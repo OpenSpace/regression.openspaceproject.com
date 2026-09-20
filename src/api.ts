@@ -50,15 +50,35 @@ import {
   updateReferencePointer
 } from './globals';
 import { createThumbnail, generateComparisonImage, saveComparisonImage } from './image';
-import {
-  addTestData,
-  loadTestRecord,
-  regenerateTestResults,
-  reloadTestResults,
-  saveTestData,
-  TestData,
-  TestRecords
-} from './testrecords';
+import { addTestData, loadTestRecord, regenerateTestResults, saveTestData, TestData } from './testrecords';
+import { z } from 'zod';
+
+/**
+ * Zod schema for test submission validation
+ */
+const SubmitTestSchema = z.object({
+  runnerID: z.string().min(1, "Runner ID is required"),
+  hardware: z.string().min(1, "Hardware name is required"),
+  group: z.string().min(1, "Group name is required"),
+  name: z.string().min(1, "Test name is required"),
+  timestamp: z.string().refine((val) => !isNaN(Date.parse(val)), {
+    message: "Invalid timestamp format"
+  }),
+  timing: z.number().min(0, "Timing must be a positive number"),
+  commitHash: z.string().min(1, "Commit hash is required")
+});
+
+/**
+ * Validates the submitted test data
+ */
+function validateSubmitTest(body: any): { valid: boolean; error?: string } {
+  try {
+    const parsed = SubmitTestSchema.parse(body);
+    return { valid: true };
+  } catch (err: any) {
+    return { valid: false, error: err.errors.map((e: any) => e.message).join(', ') };
+  }
+}
 
 /**
  * Registers the routes for the available API calls.
@@ -414,6 +434,13 @@ async function handleChangeThreshold(req: express.Request, res: express.Response
  *   - file: The generated candidate file
  */
 async function handleSubmitTest(req: express.Request, res: express.Response) {
+  // Validate submitted data with Zod schema
+  const validation = validateSubmitTest(req.body);
+  if (!validation.valid) {
+    res.status(400).json({ error: `Validation error: ${validation.error}` });
+    return;
+  }
+
   const runner = req.body.runnerID;
   if (runner == null) {
     res.status(400).json({ error: "Missing field 'runnerID'" });
