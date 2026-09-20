@@ -5,6 +5,9 @@
   "main": "index.cjs",
   "scripts": {
     "server": "node index.cjs",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:frontend\"",
+    "dev:server": "nodemon --watch src --exec ts-node src/main.ts",
+    "dev:frontend": "cd frontend && npm run dev",
     "build:frontend": "cd frontend && npm install && npm run build",
     "build:backend": "tsc",
     "build": "npm run build:frontend && npm run build:backend",
@@ -16,9 +19,12 @@
   "dependencies": {
     "@slack/web-api": "^7.0.4",
     "@types/pngjs": "^6.0.4",
+    "better-sqlite3": "^13.0.3",
     "body-parser": "^2.2.1",
     "cors": "^2.8.5",
+    "dotenv": "^18.0.1",
     "express": "^5.2.0",
+    "express-rate-limit": "^8.7.0",
     "fs": "^0.0.1-security",
     "glob": "^11.1.0",
     "multer": "^2.1.1",
@@ -34,6 +40,7 @@
     "@types/node": "^20.12.7",
     "@types/pixelmatch": "^5.2.6",
     "@types/resize-img": "^2.0.3",
+    "concurrently": "^10.0.5",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react": "^7.37.5",
@@ -41,6 +48,8 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "eslint-plugin-simple-import-sort": "^12.1.1",
     "globals": "^17.4.0",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
     "typescript": "^5.4.5",
     "typescript-eslint": "^8.58.0"
   }
