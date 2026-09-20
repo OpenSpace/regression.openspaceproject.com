@@ -48,7 +48,7 @@ export function main() {
   loadTestResults();
 
   const app = express();
-  app.use(cors({ origin: '*' }));
+  app.use(cors({ origin: Config.corsOrigins }));
 
   registerRoutes(app);
   app.use('/common', express.static('public/common'));
