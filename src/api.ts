@@ -50,7 +50,15 @@ import {
   updateReferencePointer
 } from './globals';
 import { createThumbnail, generateComparisonImage, saveComparisonImage } from './image';
-import { addTestData, loadTestRecord, regenerateTestResults, saveTestData, TestData } from './testrecords';
+import {
+  addTestData,
+  loadTestRecord,
+  regenerateTestResults,
+  reloadTestResults,
+  saveTestData,
+  TestData,
+  TestRecords
+} from './testrecords';
 import { z } from 'zod';
 
 /**
