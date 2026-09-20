@@ -257,8 +257,7 @@ export default function Home() {
         <Group gap={'xs'}>
           <Text fw={600}>Search:</Text>
           <SearchBar
-            value={globalSearch}
-            onChange={(e) => setGlobalSearch(e.target.value)}
+            onSearch={(value) => setGlobalSearch(value)}
             placeholder="Search group, name, or hardware..."
             size="xs"
             w={300}

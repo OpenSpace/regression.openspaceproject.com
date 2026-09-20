@@ -1,8 +1,8 @@
-import { ActionIcon, Group, Input, InputProps, Text } from '@mantine/core';
+import { ActionIcon, Input, InputProps, Text } from '@mantine/core';
 import { useState } from 'react';
 
 interface SearchBarProps extends InputProps {
-  onSearch: (value: string) => void;
+  onSearch?: (value: string) => void;
   placeholder?: string;
 }
 
@@ -12,12 +12,12 @@ export function SearchBar({ onSearch, placeholder = 'Search...', ...props }: Sea
   const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
     const searchValue = e.target.value;
     setValue(searchValue);
-    onSearch(searchValue);
+    onSearch?.(searchValue);
   };
 
   const clearSearch = () => {
     setValue('');
-    onSearch('');
+    onSearch?.('');
   };
 
   return (
