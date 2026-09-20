@@ -281,7 +281,8 @@ export default function Home() {
       </Group>
 
       {/* Test records table */}
-      <Table striped highlightOnHover withColumnBorders stickyHeader fz={'md'}>
+      <ScrollArea style={{ overflowX: 'auto' }}>
+        <Table striped highlightOnHover withColumnBorders stickyHeader fz={'md'}>
         <Table.Thead>
           <Table.Tr>
             <SortableHeader
@@ -378,6 +379,7 @@ export default function Home() {
           ))}
         </Table.Tbody>
       </Table>
+      </ScrollArea>
 
       <Modal
         opened={selectedRecord !== null}
