@@ -15,9 +15,12 @@ import {
   Text,
   TextInput,
   Title,
-  Tooltip
+  Tooltip,
+  Card,
+  SimpleGrid
 } from '@mantine/core';
 
+import { SearchBar } from '../components/SearchBar';
 import { SortableHeader } from '../components/SortableHeader';
 import { TestHistory } from '../components/TestHistory';
 import { TestRow } from '../components/TestRow';
@@ -35,9 +38,36 @@ export default function Home() {
 
   const [groupFilter, setGroupFilter] = useState('');
   const [nameFilter, setNameFilter] = useState('');
+  const [globalSearch, setGlobalSearch] = useState('');
 
   const [searchParams] = useSearchParams();
   const initialLinkHandled = useRef(false);
+
+  // Calculate metrics from records
+  const metrics = useMemo(() => {
+    if (records.length === 0) {
+      return {
+        totalTests: 0,
+        recentPassRate: 0,
+        avgTiming: 0,
+        hardwareCount: 0
+      };
+    }
+
+    const totalTests = records.length;
+    const recentPasses = records.filter((r) => r.data.length > 0 && r.data[r.data.length - 1].pixelError < 0.01).length;
+    const recentPassRate = totalTests > 0 ? ((recentPasses / totalTests) * 100).toFixed(1) : '0.0';
+    
+    const totalTiming = records.reduce((sum, r) => sum + (r.data[r.data.length - 1]?.timing || 0), 0);
+    const avgTiming = totalTests > 0 ? (totalTiming / totalTests).toFixed(2) : '0.0';
+
+    return {
+      totalTests,
+      recentPassRate: parseFloat(recentPassRate),
+      avgTiming: parseFloat(avgTiming),
+      hardwareCount: new Set(records.map((r) => r.hardware)).size
+    };
+  }, [records]);
 
   // Auto-open modal when URL contains group/name/hardware params
   useEffect(() => {
@@ -137,9 +167,17 @@ export default function Home() {
           return false;
         if (nameFilter && !r.name.toLowerCase().includes(nameFilter.toLowerCase()))
           return false;
+        if (globalSearch) {
+          const searchLower = globalSearch.toLowerCase();
+          return (
+            r.group.toLowerCase().includes(searchLower) ||
+            r.name.toLowerCase().includes(searchLower) ||
+            r.hardware.toLowerCase().includes(searchLower)
+          );
+        }
         return true;
       }),
-    [records, sortCol, sortDir, selectedHardware, groupFilter, nameFilter]
+    [records, sortCol, sortDir, selectedHardware, groupFilter, nameFilter, globalSearch]
   );
 
   return (
@@ -158,6 +196,29 @@ export default function Home() {
           </Link>
         </Title>
       </Box>
+
+      {/* Metrics */}\n      {records.length > 0 && (
+        <Box p={'sm'} style={{ backgroundColor: 'var(--mantine-color-dark-5)' }}>
+          <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="sm">
+            <Card>
+              <Text size="xs" c="dimmed">Total Tests</Text>
+              <Text size="xl" fw={700}>{metrics.totalTests}</Text>
+            </Card>
+            <Card>
+              <Text size="xs" c="dimmed">Recent Pass Rate</Text>
+              <Text size="xl" fw={700} c={metrics.recentPassRate >= 90 ? 'green' : 'yellow'}>{metrics.recentPassRate}%</Text>
+            </Card>
+            <Card>
+              <Text size="xs" c="dimmed">Avg Timing (ms)</Text>
+              <Text size="xl" fw={700}>{metrics.avgTiming}</Text>
+            </Card>
+            <Card>
+              <Text size="xs" c="dimmed">Hardware Count</Text>
+              <Text size="xl" fw={700}>{metrics.hardwareCount}</Text>
+            </Card>
+          </SimpleGrid>
+        </Box>
+      )}
 
       {/* Controls */}
       <Group
@@ -192,6 +253,16 @@ export default function Home() {
           <Anchor component={Link} to={'/compare'} size={'sm'}>
             Hardware Compare
           </Anchor>
+        </Group>
+        <Group gap={'xs'}>
+          <Text fw={600}>Search:</Text>
+          <SearchBar
+            value={globalSearch}
+            onChange={(e) => setGlobalSearch(e.target.value)}
+            placeholder="Search group, name, or hardware..."
+            size="xs"
+            w={300}
+          />
         </Group>
         <Group gap={'xs'}>
           <Text fw={600}>Admin:</Text>
