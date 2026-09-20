@@ -71,6 +71,7 @@ export function registerRoutes(app: express.Application) {
   app.get('/api/compare/:type/:group/:name/:hardware1/:hardware2', handleCompare);
   app.get('/api/test-records', handleTestRecords);
   app.get('/api/config', handleConfig);
+  app.get('/api/health', handleHealth);
   app.get('/api/diff-threshold', handleThreshold);
   app.post(
     '/api/update-diff-threshold',
@@ -345,6 +346,17 @@ function handleTestRecords(req: express.Request, res: express.Response) {
  */
 function handleConfig(req: express.Request, res: express.Response) {
   res.status(200).json({ preferredHardware: Config.preferredHardware });
+}
+
+/**
+ * Health check endpoint for monitoring
+ */
+function handleHealth(req: express.Request, res: express.Response) {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
+  });
 }
 
 /**
