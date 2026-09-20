@@ -25,8 +25,8 @@
 import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
-import { Config } from './configuration';
-import { TestData } from './testrecords';
+import { Config } from '../configuration';
+import { TestData } from '../testrecords';
 
 const DB_PATH = path.join(Config.data, 'testresults.db');
 
