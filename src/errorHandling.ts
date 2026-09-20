@@ -1,34 +1,11 @@
-/*****************************************************************************************
- *                                                                                       *
- * OpenSpace Visual Testing                                                              *
- *                                                                                       *
- * Copyright (c) 2024-2026                                                               *
- *                                                                                       *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of this  *
- * software and associated documentation files (the "Software"), to deal in the Software *
- * without restriction, including without limitation the rights to use, copy, modify,    *
- * merge, publish, distribute, sublicense, and/or sell copies of the Software, and to    *
- * permit persons to whom the Software is furnished to do so, subject to the following   *
- * conditions:                                                                           *
- *                                                                                       *
- * The above copyright notice and this permission notice shall be included in all copies *
- * or substantial portions of the Software.                                              *
- *                                                                                       *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,   *
- * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A         *
- * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT    *
- * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF  *
- * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE  *
- * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                         *
- ****************************************************************************************/
-
-import { Client } from '@slack/web-api';
+import { WebClient } from '@slack/web-api';
 import { Config } from './configuration';
+import { Request, Response, NextFunction, RequestHandler } from 'express';
 
 /**
  * Slack client for sending notifications
  */
-let slackClient: Client | null = null;
+let slackClient: WebClient | null = null;
 
 /**
  * Initialize Slack client if credentials are configured
@@ -36,7 +13,7 @@ let slackClient: Client | null = null;
 export function initializeErrorReporting(): void {
   if (Config.slackToken && Config.slackChannel) {
     try {
-      slackClient = new Client(Config.slackToken);
+      slackClient = new WebClient(Config.slackToken);
       console.log('Error reporting initialized with Slack integration');
     } catch (err) {
       console.error('Failed to initialize Slack client:', err);
@@ -55,7 +32,7 @@ export async function sendErrorNotification(error: Error, context?: string): Pro
 
   try {
     const errorSummary = {
-      text: '⚠️ Error in OpenSpace Visual Testing',
+      text: 'Error in OpenSpace Visual Testing',
       attachments: [
         {
           color: 'danger',
@@ -81,9 +58,9 @@ export async function sendErrorNotification(error: Error, context?: string): Pro
       channel: Config.slackChannel,
       ...errorSummary
     });
-    
+
     console.log('Error notification sent to Slack');
-  } catch (slackErr) {
+  } catch (slackErr: any) {
     console.error('Failed to send Slack notification:', slackErr);
     // Fallback to console logging
     console.error(`[Error] ${context || 'Unspecified context'}: ${error.message}`);
@@ -95,9 +72,9 @@ export async function sendErrorNotification(error: Error, context?: string): Pro
  */
 export function errorHandler(
   err: Error,
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction
+  req: Request,
+  res: Response,
+  next: NextFunction
 ): void {
   // Log the error
   console.error(`[${new Date().toISOString()}] Error in ${req.method} ${req.path}:`);
@@ -120,8 +97,8 @@ export function errorHandler(
 /**
  * Try-catch wrapper for async handlers
  */
-export function asyncHandler(handler: express.RequestHandler): express.RequestHandler {
-  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+export function asyncHandler(handler: RequestHandler): RequestHandler {
+  return async (req: Request, res: Response, next: NextFunction) => {
     try {
       await handler(req, res, next);
     } catch (err) {
