@@ -22,6 +22,7 @@
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                         *
  ****************************************************************************************/
 
+import 'dotenv/config';
 import fs from 'fs';
 import { z } from 'zod';
 
@@ -45,27 +46,71 @@ const ConfigurationSchema = z
   })
   .strict();
 
+/**
+ * Schema for environment variables with fallbacks to config file values
+ */
+const EnvironmentSchema = z.object({
+  PORT: z.string().transform((val) => parseInt(val, 10)).optional(),
+  DATA_DIR: z.string().optional(),
+  ADMIN_TOKEN: z.string().optional(),
+  SLACK_TOKEN: z.string().optional(),
+  SLACK_CHANNEL: z.string().optional(),
+  CORS_ORIGINS: z.string().optional(),
+  COMPARISON_THRESHOLD: z.string().transform((val) => parseFloat(val)).optional(),
+  IMAGE_WIDTH: z.string().transform((val) => parseInt(val, 10)).optional(),
+  IMAGE_HEIGHT: z.string().transform((val) => parseInt(val, 10)).optional(),
+  THUMBNAIL_SCALE: z.string().transform((val) => parseInt(val, 10)).optional(),
+  RATE_LIMIT_WINDOW_MS: z.string().transform((val) => parseInt(val, 10)).optional(),
+  RATE_LIMIT_MAX_REQUESTS: z.string().transform((val) => parseInt(val, 10)).optional()
+});
+
+/**
+ * Parsed environment variables
+ */
+let EnvConfig: z.infer<typeof EnvironmentSchema>;
+
+/**
+ * Loads environment configuration from .env file
+ */
+function loadEnvironmentConfig(): z.infer<typeof EnvironmentSchema> {
+  const res = EnvironmentSchema.safeParse(process.env);
+  
+  if (!res.success) {
+    console.error('Environment variable validation errors:', res.error.issues);
+    process.exit(1);
+  }
+  
+  return res.data;
+}
+
 class Configuration {
-  constructor(configFile: string) {
+  constructor(configFile: string, envConfig: z.infer<typeof EnvironmentSchema>) {
+    // Load config file first
     const data = JSON.parse(fs.readFileSync(configFile).toString());
     const res = ConfigurationSchema.safeParse(data);
 
     if (!res.success) {
-      console.error(res.error.issues);
-      process.exit();
+      console.error('Configuration file validation errors:', res.error.issues);
+      process.exit(1);
     }
 
     const config = res.data;
-    this.port = config.port;
-    this.slackToken = config.slack.token;
-    this.slackChannel = config.slack.channel;
-    this.comparisonThreshold = config.comparisonThreshold;
-    this.size = config.imageSize;
-    this.thumbnailScale = config.thumbnailScale;
-    this.adminToken = config.adminToken;
-    this.data = config.data;
+    
+    // Use environment variables if set, otherwise use config file values
+    this.port = envConfig.PORT ?? config.port;
+    this.slackToken = envConfig.SLACK_TOKEN ?? config.slack.token;
+    this.slackChannel = envConfig.SLACK_CHANNEL ?? config.slack.channel;
+    this.comparisonThreshold = envConfig.COMPARISON_THRESHOLD ?? config.comparisonThreshold;
+    this.size = {
+      width: envConfig.IMAGE_WIDTH ?? config.imageSize.width,
+      height: envConfig.IMAGE_HEIGHT ?? config.imageSize.height
+    };
+    this.thumbnailScale = envConfig.THUMBNAIL_SCALE ?? config.thumbnailScale;
+    this.adminToken = envConfig.ADMIN_TOKEN ?? config.adminToken;
+    this.data = envConfig.DATA_DIR ?? config.data;
     this.runners = config.runners;
     this.preferredHardware = config.preferredHardware ?? [];
+    this.corsOrigins = envConfig.CORS_ORIGINS ?? '*';
     this.path = configFile;
   }
 
@@ -102,18 +147,22 @@ class Configuration {
   /// The list of hardware names that should be checked by default in the frontend
   preferredHardware: string[];
 
+  /// The list of CORS origins that are allowed to access the API
+  corsOrigins: string;
+
   /// The path to where the configuration file lives
   path: string;
 }
 
 /**
- * Loads the configuration file from the provided `path` and stores the results into the
- * global configuration object.
+ * Loads the configuration from both .env file and config.json.
+ * Environment variables take precedence over config file values.
  *
- * @param path The path from which to load the configuration
+ * @param path The path to the config.json file
  */
 export function loadConfiguration(path: string) {
-  Config = new Configuration(path);
+  EnvConfig = loadEnvironmentConfig();
+  Config = new Configuration(path, EnvConfig);
 }
 
 /**
