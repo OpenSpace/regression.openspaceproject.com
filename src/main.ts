@@ -35,7 +35,6 @@ export function main() {
 
     const app = express();
     app.use(cors({ origin: Config.corsOrigins }));
-    app.use(errorHandler);
 
     registerRoutes(app);
     app.use('/common', express.static('public/common'));
@@ -43,6 +42,10 @@ export function main() {
     app.use((_req, res) => {
       res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
     });
+
+    // The error handler has to be registered after the routes, as Express only forwards
+    // errors to handlers that come later in the middleware chain
+    app.use(errorHandler);
 
     console.log(`Listening on port: ${Config.port}`);
     app.listen(Config.port);

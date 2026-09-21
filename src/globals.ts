@@ -42,6 +42,39 @@ export function dateToPath(date: Date): string {
 }
 
 /**
+ * The shape of a folder name as it is created by `dateToPath`, for example
+ * "20260610T153545847Z".
+ */
+const FolderTimestamp = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z$/;
+
+/**
+ * Parses a folder name (in the format produced by dateToPath) and returns a Date object.
+ * This is the inverse of dateToPath.
+ *
+ * @param folderName The folder name to parse (e.g., "20260610T153545847Z")
+ * @returns A Date object representing the timestamp, or `null` if the name does not have
+ *          the expected format
+ */
+export function parseFolderPathToTimestamp(folderName: string): Date | null {
+  const match = FolderTimestamp.exec(folderName);
+  if (match == null) {
+    return null;
+  }
+
+  return new Date(
+    Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+      Number(match[7])
+    )
+  );
+}
+
+/**
  * Returns the path used for storing the thumbnail for the provided image.
  *
  * @param path The path to the image for which the thumbnail path should be returned
@@ -60,9 +93,8 @@ export function thumbnailForImage(path: string): string {
  * @param group The name of the group for which the latest test should be returned
  * @param name The name of the test for which the latest run should be returned
  * @param hardware The hardware for which the latest test should be returned
- * @param timestamp If the date is provided, the last test before the provided date is
- *        returned. Only the date is used in this, any hours, minutes, or seconds are
- *        ignored
+ * @param timestamp If the date is provided, the last test before or at the provided date is
+ *        returned. If no exact match exists, the closest previous timestamp is returned.
  * @returns The path where the test files for the latest test are stored
  */
 export function latestTestPath(
@@ -79,8 +111,32 @@ export function latestTestPath(
   let tests = fs.readdirSync(path);
 
   if (timestamp) {
-    const prefix = dateToPath(timestamp).substring(0, 8);
-    tests = tests.filter((t) => t.startsWith(prefix));
+    const target = timestamp.getTime();
+
+    // Find the test with the largest timestamp that is at or before the target
+    let bestTest: string | null = null;
+    let bestTime = -Infinity;
+
+    for (const test of tests) {
+      const date = parseFolderPathToTimestamp(test);
+      if (date == null) {
+        // The folder does not have the shape of a test run, so we skip it
+        continue;
+      }
+
+      const time = date.getTime();
+      if (time <= target && time > bestTime) {
+        bestTime = time;
+        bestTest = test;
+      }
+    }
+
+    if (bestTest == null) {
+      // No test exists at or before the target timestamp
+      return null;
+    }
+
+    tests = [bestTest];
   }
 
   if (tests.length == 0) {

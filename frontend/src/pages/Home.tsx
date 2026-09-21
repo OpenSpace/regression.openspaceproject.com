@@ -15,12 +15,9 @@ import {
   Text,
   TextInput,
   Title,
-  Tooltip,
-  Card,
-  SimpleGrid
+  Tooltip
 } from '@mantine/core';
 
-import { SearchBar } from '../components/SearchBar';
 import { SortableHeader } from '../components/SortableHeader';
 import { TestHistory } from '../components/TestHistory';
 import { TestRow } from '../components/TestRow';
@@ -38,36 +35,9 @@ export default function Home() {
 
   const [groupFilter, setGroupFilter] = useState('');
   const [nameFilter, setNameFilter] = useState('');
-  const [globalSearch, setGlobalSearch] = useState('');
 
   const [searchParams] = useSearchParams();
   const initialLinkHandled = useRef(false);
-
-  // Calculate metrics from records
-  const metrics = useMemo(() => {
-    if (records.length === 0) {
-      return {
-        totalTests: 0,
-        recentPassRate: 0,
-        avgTiming: 0,
-        hardwareCount: 0
-      };
-    }
-
-    const totalTests = records.length;
-    const recentPasses = records.filter((r) => r.data.length > 0 && r.data[r.data.length - 1].pixelError < 0.01).length;
-    const recentPassRate = totalTests > 0 ? ((recentPasses / totalTests) * 100).toFixed(1) : '0.0';
-    
-    const totalTiming = records.reduce((sum, r) => sum + (r.data[r.data.length - 1]?.timing || 0), 0);
-    const avgTiming = totalTests > 0 ? (totalTiming / totalTests).toFixed(2) : '0.0';
-
-    return {
-      totalTests,
-      recentPassRate: parseFloat(recentPassRate),
-      avgTiming: parseFloat(avgTiming),
-      hardwareCount: new Set(records.map((r) => r.hardware)).size
-    };
-  }, [records]);
 
   // Auto-open modal when URL contains group/name/hardware params
   useEffect(() => {
@@ -167,68 +137,40 @@ export default function Home() {
           return false;
         if (nameFilter && !r.name.toLowerCase().includes(nameFilter.toLowerCase()))
           return false;
-        if (globalSearch) {
-          const searchLower = globalSearch.toLowerCase();
-          return (
-            r.group.toLowerCase().includes(searchLower) ||
-            r.name.toLowerCase().includes(searchLower) ||
-            r.hardware.toLowerCase().includes(searchLower)
-          );
-        }
         return true;
       }),
-    [records, sortCol, sortDir, selectedHardware, groupFilter, nameFilter, globalSearch]
+    [records, sortCol, sortDir, selectedHardware, groupFilter, nameFilter]
   );
 
   return (
-    <Box>
+    <Box style={{ fontFamily: 'Roboto, sans-serif' }}>
       {/* Header */}
       <Box
-        py={'md'}
-        style={{ textAlign: 'center', backgroundColor: 'var(--mantine-color-dark-7)' }}
+        py={'xl'}
+        style={{ textAlign: 'center', backgroundColor: '#1a1a1a', borderBottom: '1px solid #333' }}
       >
         <Title
           order={1}
-          style={{ fontVariant: 'small-caps', fontFamily: 'Roboto, sans-serif' }}
+          style={{ fontVariant: 'small-caps', color: '#ffffff', marginBottom: '1rem' }}
         >
-          <Link to={'/'} style={{ textDecoration: 'none', color: 'white' }}>
+          <Link to={'/'} style={{ textDecoration: 'none', color: '#ffffff' }}>
             OpenSpace Image Testing
           </Link>
         </Title>
+        <Text c="dimmed" style={{ fontSize: '0.9rem' }}>
+          Visual Testing Dashboard
+        </Text>
       </Box>
-
-      {/* Metrics */}\n      {records.length > 0 && (
-        <Box p={'sm'} style={{ backgroundColor: 'var(--mantine-color-dark-5)' }}>
-          <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="sm">
-            <Card>
-              <Text size="xs" c="dimmed">Total Tests</Text>
-              <Text size="xl" fw={700}>{metrics.totalTests}</Text>
-            </Card>
-            <Card>
-              <Text size="xs" c="dimmed">Recent Pass Rate</Text>
-              <Text size="xl" fw={700} c={metrics.recentPassRate >= 90 ? 'green' : 'yellow'}>{metrics.recentPassRate}%</Text>
-            </Card>
-            <Card>
-              <Text size="xs" c="dimmed">Avg Timing (ms)</Text>
-              <Text size="xl" fw={700}>{metrics.avgTiming}</Text>
-            </Card>
-            <Card>
-              <Text size="xs" c="dimmed">Hardware Count</Text>
-              <Text size="xl" fw={700}>{metrics.hardwareCount}</Text>
-            </Card>
-          </SimpleGrid>
-        </Box>
-      )}
 
       {/* Controls */}
       <Group
-        p={'sm'}
+        p={'md'}
         align={'flex-start'}
         justify={'space-between'}
-        style={{ backgroundColor: 'var(--mantine-color-dark-6)' }}
+        style={{ backgroundColor: '#252525', borderBottom: '1px solid #333' }}
       >
         <Group gap={'sm'} align={'center'} wrap={'wrap'}>
-          <Text fw={600}>Hardware:</Text>
+          <Text fw={600} style={{ color: '#e0e0e0' }}>Hardware:</Text>
           <Select
             size={'xs'}
             w={200}
@@ -255,16 +197,7 @@ export default function Home() {
           </Anchor>
         </Group>
         <Group gap={'xs'}>
-          <Text fw={600}>Search:</Text>
-          <SearchBar
-            onSearch={(value) => setGlobalSearch(value)}
-            placeholder="Search group, name, or hardware..."
-            size="xs"
-            w={300}
-          />
-        </Group>
-        <Group gap={'xs'}>
-          <Text fw={600}>Admin:</Text>
+          <Text fw={600} style={{ color: '#e0e0e0' }}>Admin:</Text>
           <PasswordInput
             size={'xs'}
             w={180}
@@ -280,8 +213,17 @@ export default function Home() {
       </Group>
 
       {/* Test records table */}
-      <ScrollArea style={{ overflowX: 'auto' }}>
-        <Table striped highlightOnHover withColumnBorders stickyHeader fz={'md'}>
+      <ScrollArea
+        offsetScrollbars
+        style={{ maxHeight: 'calc(100vh - 250px)', overflowX: 'auto' }}
+      >
+        <Table
+          horizontalSpacing={'xs'}
+          verticalSpacing={4}
+          withTableBorder
+          withColumnBorders
+          style={{ minWidth: '1200px' }}
+        >
         <Table.Thead>
           <Table.Tr>
             <SortableHeader

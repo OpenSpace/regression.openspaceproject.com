@@ -26,7 +26,7 @@ import bodyParser from 'body-parser';
 import express from 'express';
 import fs from 'fs';
 import multer from 'multer';
-import path from 'path';
+import pathModule from 'path';
 import { PNG } from 'pngjs';
 
 import { printAudit } from './audit';
@@ -47,6 +47,7 @@ import {
   testDataPath,
   testPath,
   thumbnailForImage,
+  parseFolderPathToTimestamp,
   updateReferencePointer
 } from './globals';
 import { createThumbnail, generateComparisonImage, saveComparisonImage } from './image';
@@ -65,15 +66,15 @@ import { z } from 'zod';
  * Zod schema for test submission validation
  */
 const SubmitTestSchema = z.object({
-  runnerID: z.string().min(1, "Runner ID is required"),
-  hardware: z.string().min(1, "Hardware name is required"),
-  group: z.string().min(1, "Group name is required"),
-  name: z.string().min(1, "Test name is required"),
+  runnerID: z.string().min(1, 'Runner ID is required'),
+  hardware: z.string().min(1, 'Hardware name is required'),
+  group: z.string().min(1, 'Group name is required'),
+  name: z.string().min(1, 'Test name is required'),
   timestamp: z.string().refine((val) => !isNaN(Date.parse(val)), {
-    message: "Invalid timestamp format"
+    message: 'Invalid timestamp format'
   }),
-  timing: z.number().min(0, "Timing must be a positive number"),
-  commitHash: z.string().min(1, "Commit hash is required")
+  timing: z.number().min(0, 'Timing must be a positive number'),
+  commitHash: z.string().min(1, 'Commit hash is required')
 });
 
 /**
@@ -132,7 +133,11 @@ function handleApi(req: express.Request, res: express.Response) {
       path: '/api/result/:type/:group/:name/:hardware/:timestamp?',
       description: `Returns the result for a specific 'type', 'group', 'name', and
         'hardware'. The 'timestamp' parameter is optional and if it is omitted, the latest
-        image is used. The type must be either 'reference', 'candidate', 'difference',
+        image is used. The 'timestamp' does not have to match a test exactly; if no test
+        ran at that exact time, the latest test that ran before it is returned instead. A
+        timestamp that does not name a timezone is interpreted as UTC. The timestamp of
+        the test that was actually used is returned in the 'Timestamp' response header.
+        The type must be either 'reference', 'candidate', 'difference',
         "reference-thumbnail", "candidate-thumbnail", "difference-thumbnail", or "log".
         For all but the last option, the result will be an image file, for the "log"
         option, the result will be a text file.`
@@ -186,6 +191,27 @@ function handleApi(req: express.Request, res: express.Response) {
 }
 
 /**
+ * Parses a timestamp as it was provided in a URL and returns it as a Date. Timestamps
+ * that do not name a timezone are interpreted as UTC, matching the timezone in which the
+ * test results are stored.
+ *
+ * @param timestamp The timestamp value that was provided in the URL
+ * @returns The parsed timestamp or `null` if the value is not a valid timestamp
+ */
+function parseRequestedTimestamp(timestamp: string): Date | null {
+  // A date-only value like "2026-06-11" is already interpreted as UTC, but a value that
+  // also contains a time, like "2026-06-11T12:00:00", would be interpreted in the
+  // server's local timezone unless it names one explicitly. As the test results are
+  // stored in UTC, we pin those values to UTC as well
+  const [, time] = timestamp.split('T');
+  const hasTimezone =
+    time == null || time.includes('Z') || time.includes('+') || time.includes('-');
+
+  const date = new Date(hasTimezone ? timestamp : `${timestamp}Z`);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+/**
  * Returns a single requested result. The URL parameters used for this function are:
  *  - `type`: One of "reference", "candidate", "difference", "reference-thumbnail",
  *            "candidate-thumbnail", "difference-thumbnail", or "log"
@@ -194,7 +220,8 @@ function handleApi(req: express.Request, res: express.Response) {
  *  - `hardware`: The test's hardware for which to return the image
  *  - `timestamp`: The timestamp of the test for which to return the image. This is an
  *                 optional parameter. If it is left out, the latest result for the
- *                 specified type will be returned
+ *                 specified type will be returned. If no test exists for the exact
+ *                 timestamp, the latest test that ran at or before it is used instead
  */
 async function handleResult(req: express.Request, res: express.Response) {
   const types = [
@@ -231,13 +258,19 @@ async function handleResult(req: express.Request, res: express.Response) {
 
     basePath = p;
   } else {
+    const requested = parseRequestedTimestamp(timestamp);
+    if (requested == null) {
+      res.status(400).json({ error: `Invalid timestamp ${timestamp} provided` });
+      return;
+    }
+
     // If there is a timestamp, we are trying to find that specific test instead
-    basePath = testPath(group, name, hardware, new Date(timestamp));
+    basePath = testPath(group, name, hardware, requested);
 
     if (!fs.existsSync(basePath)) {
-      // The provided timestamp might be incomplete, so in that case we return the closest
-      // image to the provided timestamp instead
-      const p = latestTestPath(group, name, hardware, new Date(timestamp));
+      // The provided timestamp does not correspond to a test, so we return the latest
+      // test that ran at or before the requested time instead
+      const p = latestTestPath(group, name, hardware, requested);
 
       if (!p) {
         res.status(404).end();
@@ -246,6 +279,14 @@ async function handleResult(req: express.Request, res: express.Response) {
 
       basePath = p;
     }
+  }
+
+  // The folder that we ended up with holds the authoritative timestamp for this result,
+  // regardless of whether we matched a test exactly or fell back to an earlier one
+  const resolvedTimestamp = parseFolderPathToTimestamp(pathModule.basename(basePath));
+  if (resolvedTimestamp == null) {
+    res.status(500).end();
+    return;
   }
 
   let path = '';
@@ -264,30 +305,24 @@ async function handleResult(req: express.Request, res: express.Response) {
       isThumbnail = true;
     // falls through
     case 'candidate':
-      path = candidateImage(
-        group,
-        name,
-        hardware,
-        timestamp ? new Date(timestamp) : undefined
-      );
+      path = candidateImage(group, name, hardware, resolvedTimestamp);
       break;
     case 'difference-thumbnail':
       isThumbnail = true;
     // falls through
     case 'difference':
-      path = differenceImage(
-        group,
-        name,
-        hardware,
-        timestamp ? new Date(timestamp) : undefined
-      );
+      path = differenceImage(group, name, hardware, resolvedTimestamp);
       break;
     case 'log':
-      path = logFile(group, name, hardware, new Date(timestamp!));
+      path = logFile(group, name, hardware, resolvedTimestamp);
       break;
     default:
       break;
   }
+
+  // Let the caller know which test this result actually belongs to, which might be an
+  // earlier one than the timestamp that was requested
+  const headers = { Timestamp: resolvedTimestamp.toISOString() };
 
   if (isThumbnail) {
     const thumbnailPath = thumbnailForImage(path);
@@ -296,13 +331,13 @@ async function handleResult(req: express.Request, res: express.Response) {
       return;
     }
 
-    res.sendFile(thumbnailPath, { root: '.' });
+    res.sendFile(thumbnailPath, { root: '.', headers: headers });
   } else {
     if (!fs.existsSync(path)) {
       res.status(404).end();
       return;
     }
-    res.sendFile(path, { root: '.' });
+    res.sendFile(path, { root: '.', headers: headers });
   }
 }
 
@@ -600,7 +635,7 @@ async function handleSubmitTest(req: express.Request, res: express.Response) {
     timing: Number(timing),
     nErrors: nLogLines,
     commitHash: commitHash,
-    referenceImage: path.basename(reference),
+    referenceImage: pathModule.basename(reference),
     candidateImage: candidateMatch ? candidateMatch : timeStamp,
     differenceImage: differenceMatch ? differenceMatch : timeStamp
   };
@@ -740,7 +775,7 @@ async function handleUpdateReference(req: express.Request, res: express.Response
   // extract the folder name from it, and create a new file name based on the timestamp
   const currentReference = referenceImage(group, name, hardware);
   const time = dateToPath(new Date(data.timeStamp));
-  const newReference = `${path.dirname(currentReference)}/${time}.png`;
+  const newReference = `${pathModule.dirname(currentReference)}/${time}.png`;
 
   // Make the last candidate image the new reference image by copying it over
   const candidate = candidateImage(group, name, hardware, new Date(data.timeStamp));
@@ -758,7 +793,7 @@ async function handleUpdateReference(req: express.Request, res: express.Response
 
   // The diff cannot be `null` as `newReference` and `candidate` are the same image
   data.pixelError = diff!;
-  data.referenceImage = path.basename(newReference);
+  data.referenceImage = pathModule.basename(newReference);
   saveTestData(data, testDataPath(group, name, hardware, new Date(data.timeStamp)));
   reloadTestResults();
 }
