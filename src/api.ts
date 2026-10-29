@@ -73,6 +73,7 @@ import {
   readPng,
   resolutionMismatch
 } from './image';
+import { triggerRerun } from './jenkins';
 import { testLockKey, TestLocks } from './lock';
 import { ProjectRoot } from './paths';
 import { isRegenerating, startRegeneration, TestData } from './testrecords';
@@ -83,6 +84,7 @@ import {
   MaxFutureOffset,
   MaxImageDimension,
   parse,
+  RerunTestSchema,
   ResultParamsSchema,
   RunTestSchema,
   SubmitTestSchema,
@@ -242,6 +244,7 @@ export function registerRoutes(app: express.Application) {
     json,
     handleUpdateReference
   );
+  app.post('/api/rerun-test', limiters.admin, requireAdmin, json, handleRerunTest);
 }
 
 /**
@@ -299,7 +302,8 @@ function handleApi(_req: express.Request, res: express.Response) {
     {
       path: '/api/config',
       description: `Returns the configuration values that are relevant for the frontend:
-        the preferred hardware and the applications with their source repositories`
+        the preferred hardware, the applications with their source repositories, and the
+        application and hardware combinations whose tests can be rerun`
     },
     {
       path: '/api/health',
@@ -357,6 +361,18 @@ function handleApi(_req: express.Request, res: express.Response) {
         updated. Optionally, the body can contain an 'application' field that names the
         application that generated the test. If this field is omitted, the test is
         attributed to the "openspace" application.`
+    },
+    {
+      path: '/api/rerun-test',
+      description: `(Requires admin) Starts a Jenkins job that builds the application and
+        runs a single test again on the same hardware. The result is submitted like any
+        other test run once the job has finished. The admin token has to be sent in an
+        'Authorization: Bearer <token>' header. The JSON object in the body must provide
+        the 'hardware', 'group', and 'name' of the test that should be rerun. Optionally,
+        the body can contain an 'application' field (defaulting to "openspace") and a
+        'commit' field with the commit hash that should be built. If the 'commit' is
+        omitted, the latest commit is built. Returns status 202 once the job was queued
+        and status 502 if Jenkins could not start it.`
     }
   ]);
 }
@@ -579,6 +595,10 @@ function handleConfig(_req: express.Request, res: express.Response) {
     applications: Config.applications.map((app) => ({
       name: app.name,
       repository: app.repository
+    })),
+    rerunTargets: (Config.jenkins?.targets ?? []).map((t) => ({
+      application: t.application,
+      hardware: t.hardware
     }))
   });
 }
@@ -1011,4 +1031,41 @@ async function promoteLatestCandidate(
     removeCreatedFiles(created);
     throw e;
   }
+}
+
+/**
+ * Starts a Jenkins job that builds the application and runs a single test again. This API
+ * call requires the admin token. The payload of this call must be a JSON object with the
+ * following values:
+ *   - `hardware`: The hardware on which the test should be rerun
+ *   - `group`: The name of the test's group that should be rerun
+ *   - `name`: The name of the test that should be rerun
+ *   - `application`: (optional) The name of the application that generated the test. If
+ *     this field is omitted, the test is attributed to the "openspace" application
+ *   - `commit`: (optional) The commit hash that should be built. If this field is omitted,
+ *     the latest commit is built
+ */
+async function handleRerunTest(req: express.Request, res: express.Response) {
+  const { application, group, name, hardware, commit } = parse(RerunTestSchema, req.body);
+  requireApplication(application);
+
+  const node = Config.rerunNode(application, hardware);
+  if (node == null) {
+    throw new ValidationError(
+      `Tests of ${application} on ${hardware} cannot be rerun, as no Jenkins node is ` +
+        'configured for them'
+    );
+  }
+  if (latestTestRun(application, group, name, hardware) == null) {
+    throw new NotFoundError(
+      `No test found for (${application}, ${group}, ${name}, ${hardware})`
+    );
+  }
+
+  printAudit(
+    `Rerunning (${application}, ${group}, ${name}, ${hardware}) at ` +
+      `${commit ?? 'the latest commit'} on ${node} requested by ${req.ip ?? 'unknown'}`
+  );
+  await triggerRerun(node, `${group}/${name}`, commit ?? null);
+  res.status(202).json({ queued: true });
 }

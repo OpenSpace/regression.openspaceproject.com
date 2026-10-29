@@ -106,7 +106,8 @@ export default function Home() {
   const [records, setRecords] = useState<TestRecord[]>([]);
   const [config, setConfig] = useState<AppConfig>({
     preferredHardware: [],
-    applications: []
+    applications: [],
+    rerunTargets: []
   });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -313,6 +314,56 @@ export default function Home() {
     } catch (err: unknown) {
       console.error('Failed to reload the test records:', err);
     }
+    return true;
+  }
+
+  async function rerunTest(record: TestRecord, commit: string | null): Promise<boolean> {
+    const test = `${record.application} / ${record.group} / ${record.name} on ${record.hardware}`;
+    let response: Response;
+    try {
+      response = await fetch('/api/rerun-test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`
+        },
+        body: JSON.stringify({
+          application: record.application,
+          group: record.group,
+          name: record.name,
+          hardware: record.hardware,
+          ...(commit ? { commit: commit } : {})
+        })
+      });
+    } catch (err: unknown) {
+      console.error('Failed to rerun the test:', err);
+      notifications.show({
+        color: 'red',
+        title: 'Could not rerun the test',
+        message: 'The server could not be reached. Check your connection and try again.'
+      });
+      return false;
+    }
+
+    if (!response.ok) {
+      notifications.show({
+        color: 'red',
+        title: 'Could not rerun the test',
+        message:
+          response.status === 401
+            ? 'The admin token is not correct. Check the token in the header and try again.'
+            : await errorMessage(response)
+      });
+      return false;
+    }
+
+    notifications.show({
+      color: 'green',
+      title: 'Test rerun started',
+      message:
+        `Jenkins builds ${commit ? `commit ${commit.substring(0, 8)}` : 'the latest commit'} ` +
+        `and reruns ${test}. The result appears in the history once it has finished.`
+    });
     return true;
   }
 
@@ -595,6 +646,12 @@ export default function Home() {
             revision={revision}
             canUpdateReference={adminToken.trim() !== ''}
             onUpdateReference={updateReference}
+            canRerun={config.rerunTargets.some(
+              (t) =>
+                t.application === selectedRecord.application &&
+                t.hardware === selectedRecord.hardware
+            )}
+            onRerun={rerunTest}
           />
         )}
       </Modal>

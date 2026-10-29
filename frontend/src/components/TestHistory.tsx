@@ -30,6 +30,11 @@ interface Props {
   canUpdateReference: boolean;
   /// Updates the reference image and resolves to whether that was successful
   onUpdateReference: (record: TestRecord) => Promise<boolean>;
+  /// Whether the test can be rerun through Jenkins on its hardware
+  canRerun: boolean;
+  /// Reruns the test at the `commit`, or at the latest commit if it is `null`, and
+  /// resolves to whether the rerun was started
+  onRerun: (record: TestRecord, commit: string | null) => Promise<boolean>;
 }
 
 /**
@@ -42,10 +47,14 @@ export function TestHistory({
   repository,
   revision,
   canUpdateReference,
-  onUpdateReference
+  onUpdateReference,
+  canRerun,
+  onRerun
 }: Props) {
   const [updating, setUpdating] = useState(false);
   const [confirmOpened, { open, close }] = useDisclosure(false);
+  const [rerunning, setRerunning] = useState(false);
+  const [rerunOpened, rerunDialog] = useDisclosure(false);
   const [history, setHistory] = useState<TestData[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(PageSize);
@@ -81,6 +90,16 @@ export function TestHistory({
       await onUpdateReference(record);
     } finally {
       setUpdating(false);
+    }
+  }
+
+  async function rerun(commit: string | null) {
+    rerunDialog.close();
+    setRerunning(true);
+    try {
+      await onRerun(record, commit);
+    } finally {
+      setRerunning(false);
     }
   }
 
@@ -137,6 +156,33 @@ export function TestHistory({
               Yes, update reference
             </Button>
             <Button onClick={close} variant={'default'} autoFocus>
+              Cancel
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={rerunOpened}
+        onClose={rerunDialog.close}
+        title={'Rerun test'}
+        size={'lg'}
+        withCloseButton
+        centered
+      >
+        <Stack align={'center'}>
+          <Text px={'md'}>
+            Jenkins will build OpenSpace and run the test {record.name} again on{' '}
+            {record.hardware}. Which commit should be built?
+          </Text>
+          <Group>
+            {latest && (
+              <Button onClick={() => rerun(latest.commitHash)}>
+                Commit {latest.commitHash.substring(0, 8)} of the latest run
+              </Button>
+            )}
+            <Button onClick={() => rerun(null)}>Latest commit</Button>
+            <Button onClick={rerunDialog.close} variant={'default'} autoFocus>
               Cancel
             </Button>
           </Group>
@@ -258,6 +304,28 @@ export function TestHistory({
                             >
                               Create GitHub Issue
                             </Button>
+                          )}
+                          {canRerun && (
+                            <Tooltip
+                              label={'Enter the admin token in the header first'}
+                              disabled={canUpdateReference}
+                              withArrow
+                            >
+                              <Button
+                                variant={'default'}
+                                onClick={(e: React.MouseEvent) => {
+                                  if (!canUpdateReference) {
+                                    e.preventDefault();
+                                    return;
+                                  }
+                                  rerunDialog.open();
+                                }}
+                                loading={rerunning}
+                                data-disabled={canUpdateReference ? undefined : true}
+                              >
+                                Rerun Test
+                              </Button>
+                            </Tooltip>
                           )}
                         </Stack>
                       )}

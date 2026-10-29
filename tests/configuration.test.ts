@@ -59,6 +59,47 @@ describe('settings of older versions', () => {
   });
 });
 
+describe('the Jenkins configuration', () => {
+  const jenkins = {
+    url: 'https://jenkins.test',
+    job: 'image-testing',
+    targets: [{ application: 'openspace', hardware: 'windows-nvidia', node: 'node' }]
+  };
+
+  afterEach(() => {
+    delete process.env['JENKINS_USER'];
+    delete process.env['JENKINS_TOKEN'];
+  });
+
+  it('enables reruns for the targets if the credentials are set', () => {
+    process.env['JENKINS_USER'] = 'user';
+    process.env['JENKINS_TOKEN'] = 'token';
+    load({ ...baseConfig, jenkins: jenkins });
+    expect(Config.jenkins?.user).toBe('user');
+    expect(Config.jenkins?.token).toBe('token');
+    expect(Config.rerunNode('openspace', 'windows-nvidia')).toBe('node');
+    expect(Config.rerunNode('openspace', 'linux-nvidia')).toBeNull();
+  });
+
+  it('disables reruns without the credentials or the configuration', () => {
+    process.env['JENKINS_USER'] = 'user';
+    load({ ...baseConfig, jenkins: jenkins });
+    expect(Config.jenkins).toBeNull();
+    expect(Config.rerunNode('openspace', 'windows-nvidia')).toBeNull();
+
+    process.env['JENKINS_TOKEN'] = 'token';
+    load(baseConfig);
+    expect(Config.jenkins).toBeNull();
+  });
+
+  it('rejects invalid node labels', () => {
+    const target = { ...jenkins.targets[0], node: 'node && rm' };
+    expect(() =>
+      load({ ...baseConfig, jenkins: { ...jenkins, targets: [target] } })
+    ).toThrow(/jenkins\.targets\.0\.node/);
+  });
+});
+
 describe('the sample configuration', () => {
   it('is valid once the admin token is set', () => {
     const sample = fs.readFileSync(

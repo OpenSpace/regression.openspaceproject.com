@@ -87,3 +87,13 @@ export class PayloadTooLargeError extends HttpError {
     this.name = 'PayloadTooLargeError';
   }
 }
+
+/**
+ * A service that the server depends on could not be reached or failed (HTTP 502).
+ */
+export class BadGatewayError extends HttpError {
+  constructor(message: string) {
+    super(502, message);
+    this.name = 'BadGatewayError';
+  }
+}

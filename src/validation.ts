@@ -148,6 +148,18 @@ export const RunTestSchema = z.object({
 export const UpdateReferenceSchema = z.object(TestKeyShape);
 
 /**
+ * The body of the `/api/rerun-test` call. If no `commit` is provided, the latest commit
+ * of the application is built.
+ */
+export const RerunTestSchema = z.object({
+  ...TestKeyShape,
+  commit: z
+    .string()
+    .regex(/^[0-9a-f]{7,40}$/, 'must be a lowercase hexadecimal commit hash')
+    .optional()
+});
+
+/**
  * The body of the `/api/update-diff-threshold` call.
  */
 export const ThresholdSchema = z.object({

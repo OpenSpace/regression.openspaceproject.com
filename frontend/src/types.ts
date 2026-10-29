@@ -32,6 +32,8 @@ export interface Application {
 export interface AppConfig {
   preferredHardware: string[];
   applications: Application[];
+  /// The application and hardware combinations whose tests can be rerun through Jenkins
+  rerunTargets: { application: string; hardware: string }[];
 }
 
 export type SortColumn =

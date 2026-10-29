@@ -33,7 +33,7 @@ For development, `npm run dev` starts the backend (restarting it whenever a file
 
 The server expects to run behind exactly one reverse proxy (for example nginx), from which it takes the client's IP address for the rate limiting and the audit log. If the server is reachable without a proxy, clients could fake their address and work around the rate limiting.
 
-The webpage provides access to the previous test results. The main panel is the table view in the center that shows all tests that have been run sorted by their error score. For each test, the latest score, application, group, name, hardware, how long it took to run the test, which commit of OpenSpace was used to generated the test, the timestamp at which the test was run, and the reference, candidate, and difference images for the latest test are shown. The tests can be filtered by application and by hardware using the checkboxes (or the dropdowns) in the control bar at the top. By clicking on an entry, the entire test history is available. In this detail view the most recent image (on the left) also has an "Upgrade Candidate to Reference" image button, which will set the latest Candidate Image to be the new Reference image. **Note**: This should only be done when it is clear that a change in OpenSpace _improved_ the rendering. It should not be done just to silence an error message. Also note that this action can only be done after entering the "Admin" password in the header at the top of the site.
+The webpage provides access to the previous test results. The main panel is the table view in the center that shows all tests that have been run sorted by their error score. For each test, the latest score, application, group, name, hardware, how long it took to run the test, which commit of OpenSpace was used to generated the test, the timestamp at which the test was run, and the reference, candidate, and difference images for the latest test are shown. The tests can be filtered by application and by hardware using the checkboxes (or the dropdowns) in the control bar at the top. By clicking on an entry, the entire test history is available. In this detail view the most recent image (on the left) also has an "Upgrade Candidate to Reference" image button, which will set the latest Candidate Image to be the new Reference image. **Note**: This should only be done when it is clear that a change in OpenSpace _improved_ the rendering. It should not be done just to silence an error message. Also note that this action can only be done after entering the "Admin" password in the header at the top of the site. If Jenkins is configured (see [Rerunning tests](#rerunning-tests)), the "Rerun Test" button starts a Jenkins job that builds OpenSpace, either at the commit of the latest test run or at the latest commit, and runs only that test again on the same hardware. The result shows up in the history once the job has finished.
 
 The "Hardware Compare" link in the top right gives the ability to compare either the latest reference or candidate images between hardware setups. On that page, the "Application", the "Group" and the "Name" of a test is entered, and the server will then generate pairwise comparison images for each hardware setup that has run that specific test. This can be useful to ensure not only a temporal stability for individual hardware setups, but also that, for example, the Windows version of OpenSpace generates the same result as the Linux version.
 
@@ -41,7 +41,7 @@ The "Hardware Compare" link in the top right gives the ability to compare either
 ### API
 The backend has a number of API calls available that can be used to query the previous tests, submit new tests, or just run tests manually. A full list and explanations of all API calls is available at the `/api` endpoint (see [API](https://regression.openspaceproject.com/api)). Some general rules apply to all of them:
 
-  - The API calls that change the reference images or the difference threshold require the admin token in an `Authorization: Bearer <token>` header.
+  - The API calls that change the reference images or the difference threshold, or that rerun a test, require the admin token in an `Authorization: Bearer <token>` header.
   - Submitting a test (`/api/submit-test`) and running a test without storing it (`/api/run-test`) require a valid `runnerID` in the request body. It should be sent before the files, so that requests from unknown runners are rejected before their files are uploaded.
   - Application, group, test, and hardware names must start with a letter or a digit and may only contain letters, digits, `.`, `_`, and `-` (at most 128 characters).
   - Submitted images can be at most 16384x16384 pixels. Logs can be at most 64 MiB.
@@ -62,6 +62,21 @@ Older versions of the server also created a `temporary` folder for comparison im
 
 ### Image sizes
 Each application in the `applications` array of the `config.json` can define a fixed `imageSize` (width and height). For such applications, every submitted candidate image must have exactly that size, otherwise the submission is rejected. The "openspace" application uses a fixed 1920x1080 size. Applications without a fixed size (`"imageSize": null`, like "sgct") accept images of any resolution; the candidate image must then have the same resolution as the active reference image, otherwise the comparison is rejected with a resolution mismatch error.
+
+### Rerunning tests
+Tests can be rerun from the website by starting a parameterized Jenkins job (`Jenkinsfile.imagetesting` in the OpenSpace repository). To enable this, add a `jenkins` section to the `config.json` and set `JENKINS_USER` and `JENKINS_TOKEN` (an API token of that Jenkins user, which needs the permission to build the job) in the `.env` file. The "Rerun Test" button is only shown for the application and hardware combinations that are listed in the `targets`, each of which names the label of the Jenkins node that produces the results for that hardware:
+
+```json
+"jenkins": {
+  "url": "https://jenkins.example.com",
+  "job": "image-testing",
+  "targets": [
+    { "application": "openspace", "hardware": "windows-nvidia", "node": "windows-image-testing-nvidia" }
+  ]
+}
+```
+
+The server calls the `buildWithParameters` endpoint of the job with the parameters `NODE` (the label of the node), `TEST_ID` (the `group/name` of the test), and `COMMIT` (empty to build the latest commit), so the Jenkins server has to be reachable from the regression server.
 
 ### Migrating an existing data folder
 The server only understands the application-based folder layout described above. If you are upgrading a server that stores data in the old layout (`data/tests/<hardware>/...` without the application level), stop the server and run the migration script before starting the new version:

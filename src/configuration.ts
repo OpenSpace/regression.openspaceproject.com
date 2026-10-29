@@ -59,6 +59,26 @@ const ApplicationSchema = z
   .strict();
 
 /**
+ * The schema describing the Jenkins job that can be started to rerun a test. Each target
+ * maps the hardware of an application to the label of the Jenkins node that produces it.
+ */
+const JenkinsSchema = z
+  .object({
+    url: z.url(),
+    job: z.string().min(1),
+    targets: z.array(
+      z
+        .object({
+          application: NameSchema,
+          hardware: NameSchema,
+          node: z.string().regex(/^[A-Za-z0-9._-]+$/)
+        })
+        .strict()
+    )
+  })
+  .strict();
+
+/**
  * The schema describing the structure of the main configuration file.
  */
 const ConfigurationSchema = z
@@ -72,7 +92,8 @@ const ConfigurationSchema = z
     applications: z.array(ApplicationSchema).min(1).optional(),
     thumbnailScale: z.number().int().min(1),
     runners: z.array(z.string().min(1)),
-    preferredHardware: z.array(z.string()).optional()
+    preferredHardware: z.array(z.string()).optional(),
+    jenkins: JenkinsSchema.optional()
   })
   .strict();
 
@@ -119,7 +140,7 @@ const RemovedVariables: Record<string, string> = {
 /**
  * Schema for environment variables. Apart from the port and the admin token, the
  * variables are optional. The Slack variables override the values from the configuration
- * file.
+ * file. The Jenkins credentials are needed to be able to rerun tests.
  */
 const EnvironmentSchema = z.object({
   PORT: z.coerce
@@ -130,6 +151,8 @@ const EnvironmentSchema = z.object({
   ADMIN_TOKEN: optionalVariable(z.string()),
   SLACK_TOKEN: optionalVariable(z.string()),
   SLACK_CHANNEL: optionalVariable(z.string()),
+  JENKINS_USER: optionalVariable(z.string()),
+  JENKINS_TOKEN: optionalVariable(z.string()),
   CORS_ORIGINS: optionalVariable(z.string()),
   RATE_LIMIT_WINDOW_MS: optionalVariable(z.coerce.number().int().min(1000)),
   RATE_LIMIT_MAX_REQUESTS: optionalVariable(z.coerce.number().int().min(1))
@@ -199,6 +222,11 @@ class Configuration {
     this.adminToken = env.ADMIN_TOKEN ?? '';
     this.runners = config.runners;
     this.preferredHardware = config.preferredHardware ?? [];
+    // Reruns are only possible if Jenkins is configured and the credentials are provided
+    this.jenkins =
+      config.jenkins != null && env.JENKINS_USER != null && env.JENKINS_TOKEN != null
+        ? { ...config.jenkins, user: env.JENKINS_USER, token: env.JENKINS_TOKEN }
+        : null;
     this.corsOrigins = env.CORS_ORIGINS
       ? env.CORS_ORIGINS.split(',')
           .map((origin) => origin.trim())
@@ -276,6 +304,32 @@ class Configuration {
 
   /// The list of hardware names that should be checked by default in the frontend
   preferredHardware: string[];
+
+  /// The Jenkins job that is started to rerun a test, or `null` if tests cannot be rerun.
+  /// The `user` and `token` are only read from the JENKINS_USER and JENKINS_TOKEN
+  /// environment variables
+  jenkins: {
+    url: string;
+    job: string;
+    user: string;
+    token: string;
+    targets: { application: string; hardware: string; node: string }[];
+  } | null;
+
+  /**
+   * Returns the label of the Jenkins node on which the tests of the provided application
+   * and hardware can be rerun.
+   *
+   * @param application The name of the application of the test
+   * @param hardware The hardware of the test
+   * @returns The label of the Jenkins node or `null` if the test cannot be rerun
+   */
+  rerunNode(application: string, hardware: string): string | null {
+    const target = this.jenkins?.targets.find(
+      (t) => t.application === application && t.hardware === hardware
+    );
+    return target ? target.node : null;
+  }
 
   /// The list of CORS origins that are allowed to access the API, or `null` if the API
   /// should only be accessible from the same origin

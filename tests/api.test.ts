@@ -4,7 +4,7 @@ import path from 'path';
 import { PNG } from 'pngjs';
 import request from 'supertest';
 import { setTimeout as sleep } from 'timers/promises';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 // Store all data of the tests in a temporary folder instead of the project's data folder
 vi.mock('../src/paths', async () => {
@@ -57,7 +57,12 @@ beforeAll(() => {
         { name: 'sgct', imageSize: null }
       ],
       thumbnailScale: 4,
-      runners: [Runner]
+      runners: [Runner],
+      jenkins: {
+        url: 'https://jenkins.test/',
+        job: 'image testing',
+        targets: [{ application: 'openspace', hardware: 'hw1', node: 'node-hw1' }]
+      }
     })
   );
   // The package.json is needed for the version reported by the health check
@@ -65,6 +70,8 @@ beforeAll(() => {
 
   process.env['PORT'] = '8000';
   process.env['ADMIN_TOKEN'] = AdminToken;
+  process.env['JENKINS_USER'] = 'jenkins-user';
+  process.env['JENKINS_TOKEN'] = 'jenkins-token';
   loadConfiguration(configFile, path.join(ProjectRoot, 'missing.env'));
   initializeAudit();
   openDatabase();
@@ -337,6 +344,81 @@ describe('updating the reference image', () => {
   });
 });
 
+describe('rerunning tests', () => {
+  function rerun(body: Record<string, string>, token: string | null = AdminToken) {
+    const req = request(app).post('/api/rerun-test');
+    if (token != null) {
+      req.set('Authorization', `Bearer ${token}`);
+    }
+    return req.send({ group: 'group', name: 'test', hardware: 'hw1', ...body });
+  }
+
+  function mockJenkins(response: Response | Error) {
+    return vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(() =>
+        response instanceof Error ? Promise.reject(response) : Promise.resolve(response)
+      );
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('requires the admin token', async () => {
+    const jenkins = mockJenkins(new Response(null, { status: 201 }));
+    expect((await rerun({}, null)).status).toBe(401);
+    expect((await rerun({}, 'wrong-token')).status).toBe(401);
+    expect(jenkins).not.toHaveBeenCalled();
+  });
+
+  it('starts the Jenkins job for the node of the hardware', async () => {
+    const jenkins = mockJenkins(new Response(null, { status: 201 }));
+
+    const latest = await rerun({});
+    expect(latest.status).toBe(202);
+    expect(jenkins).toHaveBeenCalledTimes(1);
+    const [url, init] = jenkins.mock.calls[0]!;
+    expect(url).toBe('https://jenkins.test/job/image%20testing/buildWithParameters');
+    expect(init?.method).toBe('POST');
+    expect((init?.headers as Record<string, string>)['Authorization']).toBe(
+      `Basic ${Buffer.from('jenkins-user:jenkins-token').toString('base64')}`
+    );
+    expect(Object.fromEntries(init?.body as URLSearchParams)).toEqual({
+      NODE: 'node-hw1',
+      TEST_ID: 'group/test',
+      COMMIT: ''
+    });
+
+    expect((await rerun({ commit: 'abcdef1' })).status).toBe(202);
+    const body = jenkins.mock.calls[1]![1]?.body as URLSearchParams;
+    expect(body.get('COMMIT')).toBe('abcdef1');
+  });
+
+  it('rejects tests that cannot be rerun and invalid commits', async () => {
+    const jenkins = mockJenkins(new Response(null, { status: 201 }));
+    expect((await rerun({ hardware: 'hw2' })).status).toBe(400);
+    expect((await rerun({ application: 'sgct' })).status).toBe(400);
+    expect((await rerun({ commit: 'main; rm -rf' })).status).toBe(400);
+    expect((await rerun({ name: 'unknown' })).status).toBe(404);
+    expect(jenkins).not.toHaveBeenCalled();
+  });
+
+  it('reports when Jenkins fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    mockJenkins(new Response(null, { status: 403 }));
+    const rejected = await rerun({});
+    expect(rejected.status).toBe(502);
+    expect(rejected.body.error).toMatch(/status 403/);
+
+    mockJenkins(new Error('connect ECONNREFUSED'));
+    const unreachable = await rerun({});
+    expect(unreachable.status).toBe(502);
+    expect(unreachable.body.error).not.toMatch(/ECONNREFUSED/);
+  });
+});
+
 describe('comparing hardware', () => {
   it('compares the images of two hardware setups in memory', async () => {
     expect((await submit({ hardware: 'hw2' }, makePng([0, 0, 255], 32))).status).toBe(
@@ -366,6 +448,9 @@ describe('other endpoints', () => {
     expect(res.body.applications).toEqual([
       { name: 'openspace', repository: 'https://github.com/OpenSpace/OpenSpace' },
       { name: 'sgct', repository: 'https://github.com/SGCT/SGCT' }
+    ]);
+    expect(res.body.rerunTargets).toEqual([
+      { application: 'openspace', hardware: 'hw1' }
     ]);
   });
 
