@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Config, loadConfiguration } from '../src/configuration';
 
@@ -67,5 +67,36 @@ describe('the sample configuration', () => {
     );
     load(JSON.parse(sample));
     expect(Config.applications.map((app) => app.name)).toEqual(['openspace', 'sgct']);
+  });
+});
+
+describe('values that can only be set in the configuration file', () => {
+  const variables = [
+    'COMPARISON_THRESHOLD',
+    'IMAGE_WIDTH',
+    'IMAGE_HEIGHT',
+    'THUMBNAIL_SCALE'
+  ];
+
+  afterEach(() => {
+    variables.forEach((variable) => delete process.env[variable]);
+    vi.restoreAllMocks();
+  });
+
+  it('ignores the old environment variables with a warning', () => {
+    process.env['COMPARISON_THRESHOLD'] = '0.9';
+    process.env['IMAGE_WIDTH'] = '640';
+    process.env['IMAGE_HEIGHT'] = '480';
+    process.env['THUMBNAIL_SCALE'] = '2';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    load(baseConfig);
+
+    expect(Config.comparisonThreshold).toBe(0.1);
+    expect(Config.applicationSize('openspace')).toEqual({ width: 1920, height: 1080 });
+    expect(Config.thumbnailScale).toBe(6);
+    for (const variable of variables) {
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(variable));
+    }
   });
 });

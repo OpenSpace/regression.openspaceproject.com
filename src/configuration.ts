@@ -104,8 +104,22 @@ function optionalVariable<T extends z.ZodType>(schema: T) {
 }
 
 /**
- * Schema for environment variables. Apart from the port, the variables are optional and
- * override the corresponding values from the configuration file.
+ * Environment variables that older versions used to override values of the configuration
+ * file. These values can now only be set in the configuration file, so the variables are
+ * ignored with a warning.
+ */
+const RemovedVariables: Record<string, string> = {
+  DATA_DIR: 'the data folder is always "data" next to the configuration file',
+  COMPARISON_THRESHOLD: 'set "comparisonThreshold" in the configuration file',
+  IMAGE_WIDTH: 'set "imageSize" in the configuration file',
+  IMAGE_HEIGHT: 'set "imageSize" in the configuration file',
+  THUMBNAIL_SCALE: 'set "thumbnailScale" in the configuration file'
+};
+
+/**
+ * Schema for environment variables. Apart from the port and the admin token, the
+ * variables are optional. The Slack variables override the values from the configuration
+ * file.
  */
 const EnvironmentSchema = z.object({
   PORT: z.coerce
@@ -117,10 +131,6 @@ const EnvironmentSchema = z.object({
   SLACK_TOKEN: optionalVariable(z.string()),
   SLACK_CHANNEL: optionalVariable(z.string()),
   CORS_ORIGINS: optionalVariable(z.string()),
-  COMPARISON_THRESHOLD: optionalVariable(z.coerce.number().min(0).max(1)),
-  IMAGE_WIDTH: optionalVariable(z.coerce.number().int().min(1).max(MaxImageDimension)),
-  IMAGE_HEIGHT: optionalVariable(z.coerce.number().int().min(1).max(MaxImageDimension)),
-  THUMBNAIL_SCALE: optionalVariable(z.coerce.number().int().min(1)),
   RATE_LIMIT_WINDOW_MS: optionalVariable(z.coerce.number().int().min(1000)),
   RATE_LIMIT_MAX_REQUESTS: optionalVariable(z.coerce.number().int().min(1))
 });
@@ -164,11 +174,8 @@ class Configuration {
     this.port = env.PORT;
     this.slackToken = env.SLACK_TOKEN ?? config.slack.token;
     this.slackChannel = env.SLACK_CHANNEL ?? config.slack.channel;
-    this.comparisonThreshold = env.COMPARISON_THRESHOLD ?? config.comparisonThreshold;
-    const defaultSize = {
-      width: env.IMAGE_WIDTH ?? config.imageSize.width,
-      height: env.IMAGE_HEIGHT ?? config.imageSize.height
-    };
+    this.comparisonThreshold = config.comparisonThreshold;
+    const defaultSize = config.imageSize;
     if (config.applications == null) {
       // No explicit application list: behave as a single-application server in which
       // all of the data belongs to the "openspace" application
@@ -188,7 +195,7 @@ class Configuration {
         size: app.imageSize === undefined ? defaultSize : app.imageSize
       }));
     }
-    this.thumbnailScale = env.THUMBNAIL_SCALE ?? config.thumbnailScale;
+    this.thumbnailScale = config.thumbnailScale;
     this.adminToken = env.ADMIN_TOKEN ?? '';
     this.runners = config.runners;
     this.preferredHardware = config.preferredHardware ?? [];
@@ -201,7 +208,6 @@ class Configuration {
       windowMs: env.RATE_LIMIT_WINDOW_MS ?? 60 * 1000,
       maxRequests: env.RATE_LIMIT_MAX_REQUESTS ?? 120
     };
-    this.thresholdFromEnvironment = env.COMPARISON_THRESHOLD !== undefined;
     this.path = configFile;
 
     if (this.adminToken.trim() === '') {
@@ -281,17 +287,13 @@ class Configuration {
     maxRequests: number;
   };
 
-  /// Whether the comparison threshold was set through the environment, in which case it
-  /// takes precedence over the value stored in the configuration file
-  thresholdFromEnvironment: boolean;
-
   /// The path to where the configuration file lives
   path: string;
 }
 
 /**
- * Loads the configuration from both the .env file and the config.json. Environment
- * variables take precedence over config file values.
+ * Loads the configuration from both the .env file and the config.json. The Slack
+ * variables in the environment take precedence over the config file values.
  *
  * @param configFile The path to the config.json file
  * @param envFile The path to the .env file. Variables that are already set in the
@@ -310,14 +312,20 @@ export function loadConfiguration(
     throw new Error(`Invalid environment variables:\n${formatIssues(env.error.issues)}`);
   }
 
+  for (const [variable, replacement] of Object.entries(RemovedVariables)) {
+    if (emptyToUndefined(process.env[variable]) !== undefined) {
+      console.warn(`The environment variable ${variable} is ignored; ${replacement}`);
+    }
+  }
+
   Config = new Configuration(configFile, env.data);
 }
 
 /**
  * Changes the comparison threshold and stores the new value in the configuration file.
  * Only the threshold is changed in the file; values that were provided through the
- * environment are never written to it. The file is replaced atomically, so that an
- * interrupted write cannot leave a broken configuration behind.
+ * environment, such as the Slack token, are never written to it. The file is replaced
+ * atomically, so that an interrupted write cannot leave a broken configuration behind.
  *
  * @param threshold The new comparison threshold
  */
@@ -329,13 +337,6 @@ export function saveComparisonThreshold(threshold: number) {
   const temporary = `${Config.path}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`);
   fs.renameSync(temporary, Config.path);
-
-  if (Config.thresholdFromEnvironment) {
-    console.warn(
-      'The comparison threshold is also set through COMPARISON_THRESHOLD, which will ' +
-        'override the stored value when the server is restarted'
-    );
-  }
 }
 
 /**
