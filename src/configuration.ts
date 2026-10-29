@@ -22,96 +22,179 @@
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                         *
  ****************************************************************************************/
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import fs from 'fs';
+import path from 'path';
 import { z } from 'zod';
+
+import { ProjectRoot } from './paths';
+import { MaxImageDimension, NameSchema } from './validation';
+
+/**
+ * The repositories that are used for the commit links of the applications that are known
+ * by default, if the configuration does not specify a repository.
+ */
+const DefaultRepositories: Record<string, string> = {
+  openspace: 'https://github.com/OpenSpace/OpenSpace',
+  sgct: 'https://github.com/SGCT/SGCT'
+};
+
+/**
+ * The schema for an image size in pixels.
+ */
+const SizeSchema = z.object({
+  width: z.number().int().min(1).max(MaxImageDimension),
+  height: z.number().int().min(1).max(MaxImageDimension)
+});
+
+/**
+ * The schema describing a single application in the configuration file.
+ */
+const ApplicationSchema = z
+  .object({
+    name: NameSchema,
+    repository: z.url().optional(),
+    imageSize: SizeSchema.nullable().optional()
+  })
+  .strict();
 
 /**
  * The schema describing the structure of the main configuration file.
  */
 const ConfigurationSchema = z
   .object({
-    port: z.number().int().min(1000).max(65535),
     slack: z.object({
       token: z.string(),
       channel: z.string()
     }),
     comparisonThreshold: z.number().min(0).max(1),
-    imageSize: z.object({ width: z.number().min(1), height: z.number().min(1) }),
-    thumbnailScale: z.number().min(1),
-    adminToken: z.string().min(1),
-    data: z.string().min(1),
+    imageSize: SizeSchema,
+    applications: z.array(ApplicationSchema).min(1).optional(),
+    thumbnailScale: z.number().int().min(1),
+    adminToken: z.string().optional(),
     runners: z.array(z.string().min(1)),
     preferredHardware: z.array(z.string()).optional()
   })
   .strict();
 
 /**
- * Schema for environment variables with fallbacks to config file values
+ * Treats empty environment variables (for example `ADMIN_TOKEN=`) as if they were unset.
+ */
+function emptyToUndefined(value: unknown): unknown {
+  return typeof value === 'string' && value.trim() === '' ? undefined : value;
+}
+
+/**
+ * Creates a schema for an optional environment variable that has to follow the `schema`.
+ */
+function optionalVariable<T extends z.ZodType>(schema: T) {
+  return z.preprocess(emptyToUndefined, schema.optional());
+}
+
+/**
+ * Schema for environment variables. Apart from the port, the variables are optional and
+ * override the corresponding values from the configuration file.
  */
 const EnvironmentSchema = z.object({
-  PORT: z.string().transform((val) => parseInt(val, 10)).optional(),
-  DATA_DIR: z.string().optional(),
-  ADMIN_TOKEN: z.string().optional(),
-  SLACK_TOKEN: z.string().optional(),
-  SLACK_CHANNEL: z.string().optional(),
-  CORS_ORIGINS: z.string().optional(),
-  COMPARISON_THRESHOLD: z.string().transform((val) => parseFloat(val)).optional(),
-  IMAGE_WIDTH: z.string().transform((val) => parseInt(val, 10)).optional(),
-  IMAGE_HEIGHT: z.string().transform((val) => parseInt(val, 10)).optional(),
-  THUMBNAIL_SCALE: z.string().transform((val) => parseInt(val, 10)).optional(),
-  RATE_LIMIT_WINDOW_MS: z.string().transform((val) => parseInt(val, 10)).optional(),
-  RATE_LIMIT_MAX_REQUESTS: z.string().transform((val) => parseInt(val, 10)).optional()
+  PORT: z.coerce
+    .number({ error: 'PORT must be set to a number in the .env file' })
+    .int()
+    .min(1)
+    .max(65535),
+  ADMIN_TOKEN: optionalVariable(z.string()),
+  SLACK_TOKEN: optionalVariable(z.string()),
+  SLACK_CHANNEL: optionalVariable(z.string()),
+  CORS_ORIGINS: optionalVariable(z.string()),
+  COMPARISON_THRESHOLD: optionalVariable(z.coerce.number().min(0).max(1)),
+  IMAGE_WIDTH: optionalVariable(z.coerce.number().int().min(1).max(MaxImageDimension)),
+  IMAGE_HEIGHT: optionalVariable(z.coerce.number().int().min(1).max(MaxImageDimension)),
+  THUMBNAIL_SCALE: optionalVariable(z.coerce.number().int().min(1)),
+  RATE_LIMIT_WINDOW_MS: optionalVariable(z.coerce.number().int().min(1000)),
+  RATE_LIMIT_MAX_REQUESTS: optionalVariable(z.coerce.number().int().min(1))
 });
 
 /**
- * Parsed environment variables
+ * Formats the issues of a failed validation into a readable list.
  */
-let EnvConfig: z.infer<typeof EnvironmentSchema>;
-
-/**
- * Loads environment configuration from .env file
- */
-function loadEnvironmentConfig(): z.infer<typeof EnvironmentSchema> {
-  const res = EnvironmentSchema.safeParse(process.env);
-  
-  if (!res.success) {
-    console.error('Environment variable validation errors:', res.error.issues);
-    process.exit(1);
-  }
-  
-  return res.data;
+function formatIssues(issues: z.core.$ZodIssue[]): string {
+  return issues
+    .map((issue) => `  ${issue.path.join('.') || '(root)'}: ${issue.message}`)
+    .join('\n');
 }
 
 class Configuration {
-  constructor(configFile: string, envConfig: z.infer<typeof EnvironmentSchema>) {
-    // Load config file first
-    const data = JSON.parse(fs.readFileSync(configFile).toString());
-    const res = ConfigurationSchema.safeParse(data);
-
-    if (!res.success) {
-      console.error('Configuration file validation errors:', res.error.issues);
-      process.exit(1);
+  constructor(configFile: string, env: z.infer<typeof EnvironmentSchema>) {
+    if (!fs.existsSync(configFile)) {
+      throw new Error(`Configuration file not found: ${configFile}`);
     }
 
+    const data: unknown = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+    if (typeof data === 'object' && data != null && 'data' in data) {
+      throw new Error(
+        `The "data" setting in ${configFile} is no longer supported. The test results ` +
+          'are always stored in the "data" folder next to the configuration file. ' +
+          'Remove the setting to continue.'
+      );
+    }
+
+    const res = ConfigurationSchema.safeParse(data);
+    if (!res.success) {
+      throw new Error(
+        `Invalid configuration file ${configFile}:\n${formatIssues(res.error.issues)}`
+      );
+    }
     const config = res.data;
-    
+
     // Use environment variables if set, otherwise use config file values
-    this.port = envConfig.PORT ?? config.port;
-    this.slackToken = envConfig.SLACK_TOKEN ?? config.slack.token;
-    this.slackChannel = envConfig.SLACK_CHANNEL ?? config.slack.channel;
-    this.comparisonThreshold = envConfig.COMPARISON_THRESHOLD ?? config.comparisonThreshold;
-    this.size = {
-      width: envConfig.IMAGE_WIDTH ?? config.imageSize.width,
-      height: envConfig.IMAGE_HEIGHT ?? config.imageSize.height
+    this.port = env.PORT;
+    this.slackToken = env.SLACK_TOKEN ?? config.slack.token;
+    this.slackChannel = env.SLACK_CHANNEL ?? config.slack.channel;
+    this.comparisonThreshold = env.COMPARISON_THRESHOLD ?? config.comparisonThreshold;
+    const defaultSize = {
+      width: env.IMAGE_WIDTH ?? config.imageSize.width,
+      height: env.IMAGE_HEIGHT ?? config.imageSize.height
     };
-    this.thumbnailScale = envConfig.THUMBNAIL_SCALE ?? config.thumbnailScale;
-    this.adminToken = envConfig.ADMIN_TOKEN ?? config.adminToken;
-    this.data = envConfig.DATA_DIR ?? config.data;
+    if (config.applications == null) {
+      // No explicit application list: behave as a single-application server in which
+      // all of the data belongs to the "openspace" application
+      this.applications = [
+        {
+          name: 'openspace',
+          repository: DefaultRepositories['openspace']!,
+          size: defaultSize
+        }
+      ];
+    } else {
+      this.applications = config.applications.map((app) => ({
+        name: app.name,
+        repository: app.repository ?? DefaultRepositories[app.name] ?? null,
+        // An explicit `null` disables the fixed image size for this application; an
+        // omitted value inherits the top-level default size
+        size: app.imageSize === undefined ? defaultSize : app.imageSize
+      }));
+    }
+    this.thumbnailScale = env.THUMBNAIL_SCALE ?? config.thumbnailScale;
+    this.adminToken = env.ADMIN_TOKEN ?? config.adminToken ?? '';
     this.runners = config.runners;
     this.preferredHardware = config.preferredHardware ?? [];
-    this.corsOrigins = envConfig.CORS_ORIGINS ?? '*';
+    this.corsOrigins = env.CORS_ORIGINS
+      ? env.CORS_ORIGINS.split(',')
+          .map((origin) => origin.trim())
+          .filter((origin) => origin.length > 0)
+      : null;
+    this.rateLimit = {
+      windowMs: env.RATE_LIMIT_WINDOW_MS ?? 60 * 1000,
+      maxRequests: env.RATE_LIMIT_MAX_REQUESTS ?? 120
+    };
+    this.thresholdFromEnvironment = env.COMPARISON_THRESHOLD !== undefined;
     this.path = configFile;
+
+    if (this.adminToken.trim() === '') {
+      throw new Error(
+        'No admin token is configured. Set ADMIN_TOKEN in the .env file (or adminToken ' +
+          `in ${configFile}) to a long, random value`
+      );
+    }
   }
 
   /// The port at which the server is available
@@ -126,20 +209,46 @@ class Configuration {
   /// The comparison threshold that the image comparison is using to detect changes
   comparisonThreshold: number;
 
-  /// The image size that all of the images must have
-  size: {
-    width: number;
-    height: number;
-  };
+  /// The applications that are allowed to submit tests. Each application has a name, the
+  /// repository that the commit hashes refer to, and the image size that its images must
+  /// have. A `null` size means that the application does not have a fixed image size; for
+  /// those applications, the candidate images only need to match the size of the current
+  /// reference image
+  applications: {
+    name: string;
+    repository: string | null;
+    size: { width: number; height: number } | null;
+  }[];
+
+  /**
+   * Returns whether the provided application name is a valid application that is allowed
+   * to submit tests to this server.
+   *
+   * @param name The name of the application to check
+   * @returns `true` if the application is known to this server, `false` otherwise
+   */
+  hasApplication(name: string): boolean {
+    return this.applications.some((app) => app.name === name);
+  }
+
+  /**
+   * Returns the image size that the images of the provided application must have, or
+   * `null` if the application does not have a fixed image size.
+   *
+   * @param name The name of the application for which to return the image size
+   * @returns The image size of the application or `null` if it has no fixed size
+   */
+  applicationSize(name: string): { width: number; height: number } | null {
+    const app = this.applications.find((a) => a.name === name);
+    return app ? app.size : null;
+  }
 
   /// The scaling factor by which the image is reduced to produce a thumbnail
   thumbnailScale: number;
 
-  /// A token that has to be sent in the header to be able to invalidate references
+  /// A token that has to be sent in the `Authorization` header to be able to perform
+  /// administrative tasks
   adminToken: string;
-
-  /// The path to where the test result data and images are being stored
-  data: string;
 
   /// The list of ids for runners that are allowed to submit tests
   runners: string[];
@@ -147,43 +256,71 @@ class Configuration {
   /// The list of hardware names that should be checked by default in the frontend
   preferredHardware: string[];
 
-  /// The list of CORS origins that are allowed to access the API
-  corsOrigins: string;
+  /// The list of CORS origins that are allowed to access the API, or `null` if the API
+  /// should only be accessible from the same origin
+  corsOrigins: string[] | null;
+
+  /// The settings for the rate limiting of the expensive API calls
+  rateLimit: {
+    windowMs: number;
+    maxRequests: number;
+  };
+
+  /// Whether the comparison threshold was set through the environment, in which case it
+  /// takes precedence over the value stored in the configuration file
+  thresholdFromEnvironment: boolean;
 
   /// The path to where the configuration file lives
   path: string;
 }
 
 /**
- * Loads the configuration from both .env file and config.json.
- * Environment variables take precedence over config file values.
+ * Loads the configuration from both the .env file and the config.json. Environment
+ * variables take precedence over config file values.
  *
- * @param path The path to the config.json file
+ * @param configFile The path to the config.json file
+ * @param envFile The path to the .env file. Variables that are already set in the
+ *        environment are not overwritten by the file
  */
-export function loadConfiguration(path: string) {
-  EnvConfig = loadEnvironmentConfig();
-  Config = new Configuration(path, EnvConfig);
+export function loadConfiguration(
+  configFile = path.join(ProjectRoot, 'config.json'),
+  envFile = path.join(ProjectRoot, '.env')
+) {
+  if (fs.existsSync(envFile)) {
+    dotenv.config({ path: envFile, quiet: true });
+  }
+
+  const env = EnvironmentSchema.safeParse(process.env);
+  if (!env.success) {
+    throw new Error(`Invalid environment variables:\n${formatIssues(env.error.issues)}`);
+  }
+
+  Config = new Configuration(configFile, env.data);
 }
 
 /**
- * Updates the configuration file on disk that was used to originally load the global
- * configuration.
+ * Changes the comparison threshold and stores the new value in the configuration file.
+ * Only the threshold is changed in the file; values that were provided through the
+ * environment are never written to it. The file is replaced atomically, so that an
+ * interrupted write cannot leave a broken configuration behind.
+ *
+ * @param threshold The new comparison threshold
  */
-export function saveConfiguration() {
-  const config = {
-    port: Config.port,
-    slack: {
-      token: Config.slackToken,
-      channel: Config.slackChannel
-    },
-    comparisonThreshold: Config.comparisonThreshold,
-    imageSize: Config.size,
-    thumbnailScale: Config.thumbnailScale,
-    adminToken: Config.adminToken,
-    data: Config.data,
-    runners: Config.runners
-  };
-  fs.writeFileSync(Config.path, JSON.stringify(config, null, 2));
+export function saveComparisonThreshold(threshold: number) {
+  Config.comparisonThreshold = threshold;
+
+  const data = JSON.parse(fs.readFileSync(Config.path, 'utf-8'));
+  data.comparisonThreshold = threshold;
+  const temporary = `${Config.path}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`);
+  fs.renameSync(temporary, Config.path);
+
+  if (Config.thresholdFromEnvironment) {
+    console.warn(
+      'The comparison threshold is also set through COMPARISON_THRESHOLD, which will ' +
+        'override the stored value when the server is restarted'
+    );
+  }
 }
 
 /**

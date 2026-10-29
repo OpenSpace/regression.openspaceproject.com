@@ -22,43 +22,51 @@
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                         *
  ****************************************************************************************/
 
-import fs, { write } from 'fs';
-import { globSync } from 'glob';
+import fs from 'fs';
 import path from 'path';
-import { z } from 'zod';
+import { PNG } from 'pngjs';
+import { setImmediate as yieldToEventLoop } from 'timers/promises';
 
-import { assert } from './assert';
 import { printAudit } from './audit';
-import { Config } from './configuration';
+import {
+  allReferencePointers,
+  allTestRuns,
+  allTests,
+  HashedImage,
+  imagesWithoutHash,
+  inTransaction,
+  setImageHash,
+  testHistory,
+  TestKeyParts,
+  updateTestRun
+} from './database';
+import { reportError } from './errorHandling';
 import {
   candidateImage,
   differenceImage,
   referenceImagePath,
+  removeFolderIfEmpty,
+  testPath,
+  testReferenceImage,
   thumbnailForImage
 } from './globals';
-import { createThumbnail, saveComparisonImage } from './image';
+import { compareImages, createThumbnail, pixelHash, readPng } from './image';
+import { testLockKey, TestLocks } from './lock';
 
-type TestRecord = {
-  /// The group name of the test record. This value contains URL safe characters
-  group: string; // @TODO Can only be filepath-valid names
-  /// The name of the test record. This value contains URL safe characters
-  name: string; // @TODO Can only be filepath-valid names
+export type TestRecord = {
+  /// The name of the application that generated this record
+  application: string;
+  /// The group name of the test record. This value only contains characters that are
+  /// allowed by the `NamePattern`
+  group: string;
+  /// The name of the test record. This value only contains characters that are allowed
+  /// by the `NamePattern`
+  name: string;
   /// The name of the hardware that was used to generate this record
   hardware: string;
-  /// The individual test runs, grouped by the hardware string
-  data: [TestData];
+  /// The individual test runs, sorted by their timestamp
+  data: TestData[];
 };
-
-const TestDataSchema = z.object({
-  pixelError: z.number().min(0).max(1),
-  timeStamp: z.coerce.date(),
-  timing: z.number().min(0),
-  nErrors: z.number().int().min(0),
-  commitHash: z.string().min(1),
-  referenceImage: z.string().min(1),
-  candidateImage: z.coerce.date(),
-  differenceImage: z.coerce.date()
-});
 
 export type TestData = {
   /// Contains the pixel error in the image as a value between 0 and 1 as the ratio of
@@ -87,247 +95,281 @@ export type TestData = {
   differenceImage: Date;
 };
 
-/// An in-memory data storage of test records. The array gets created at startup time by
-/// parsing the 'data' folder and continuously updated as new test data comes in. This
-/// array is not stored on disk, but instead recreated from files that are kept instead
-export let TestRecords: TestRecord[] = [];
-
 /**
- * Loads a test record from the provided `path`.
- *
- * @param path The path to the `.json` file that should be loaded
- * @returns The loaded TestRecord instance
+ * The number of missing files that are listed individually in the audit log
  */
-export function loadTestRecord(path: string): TestData {
-  const data = JSON.parse(fs.readFileSync(path).toString());
-  const res = TestDataSchema.safeParse(data);
-  if (!res.success) {
-    console.error(res.error.issues);
-    process.exit();
-  }
-
-  return res.data;
-}
-
-/**
- * Saves a specific test data to the provided path. It will overwrite the file that is
- * already present in that location
- *
- * @param data The TestData object that should be serialized
- * @param path The path to which the data is serialized
- */
-export function saveTestData(data: TestData, path: string) {
-  fs.writeFileSync(path, JSON.stringify(data, null, 2));
-}
-
-/**
- * Add a new test data to the internal list of records that are being kept. If the
- * `group`, `name`, or `hardware` did not exist before in the record, they will be created
- * inside this function. At the end of the function call, a record will exist that
- * contains at least the `data` passed into this function.
- *
- * @param group The name of the group to which the @param data belongs
- * @param name The name of the test to which the @param data belongs
- * @param hardware The hardware on which the test was run
- * @param data The test data that should be added to the list of test records
- * @param writeAudit If `true` the test data will be written to the audit log
- */
-export function addTestData(
-  group: string,
-  name: string,
-  hardware: string,
-  data: TestData,
-  writeAudit: boolean = true
-) {
-  if (writeAudit) {
-    printAudit(`Adding new record for (${group}/${name}/${hardware})`);
-  }
-
-  for (const record of TestRecords) {
-    if (record.group != group || record.name != name || record.hardware != hardware) {
-      continue;
-    }
-
-    if (writeAudit) {
-      printAudit('  Adding to data existing record');
-    }
-    record.data.push(data);
-    record.data.sort((a, b) => a.timeStamp.getTime() - b.timeStamp.getTime());
-    return;
-  }
-
-  // If we get here, it's a new record
-  if (writeAudit) {
-    printAudit('Creating new test record');
-  }
-  TestRecords.push({
-    group: group,
-    name: name,
-    hardware: hardware,
-    data: [data]
-  });
-}
+const MaxListedMissingFiles = 20;
 
 /**
  * Runs a check on all of the data results and ensure that they are all self consistent.
  * This includes checks for:
  *   - All reference pointers point at files that exist
- *   - All test data files' reference images exist
+ *   - All images used by the test runs, and their thumbnails, exist
+ * Missing files are reported, but do not prevent the server from starting.
  */
 export function verifyDataFolder() {
   printAudit('Verifying data files');
+  const missing: string[] = [];
 
   printAudit('  Reference pointers');
-  const references = globSync(`${Config.data}/reference/**/ref.txt`);
-  for (const reference of references) {
-    const content = fs.readFileSync(reference).toString();
-    const dir = path.dirname(reference);
-    const p = `${dir}/${content}`;
-    assert(fs.existsSync(p), `Reference image ${content} in ${reference} does not exist`);
+  for (const pointer of allReferencePointers()) {
+    const { application, group, name, hardware, referenceImage } = pointer;
+    const folder = referenceImagePath(application, group, name, hardware);
+    const p = `${folder}/${referenceImage}`;
+    if (!fs.existsSync(p)) {
+      missing.push(`Reference image ${p}`);
+    }
   }
 
-  printAudit('  Data file references');
-  const hardwares = fs.readdirSync(`${Config.data}/tests`);
-  for (const hardware of hardwares) {
-    const base = `${Config.data}/tests/${hardware}`;
+  printAudit('  Test run images');
+  // Many test runs share the same images, so every image only needs to be checked once
+  const verified = new Set<string>();
+  function verifyImage(image: string, kind: string) {
+    if (verified.has(image)) return;
+    verified.add(image);
 
-    const groups = fs.readdirSync(base);
-    for (const group of groups) {
-      const names = fs.readdirSync(`${base}/${group}`);
-      for (const name of names) {
-        console.log(`    ${group}/${name}`);
-
-        const runs = fs.readdirSync(`${base}/${group}/${name}`);
-        for (const run of runs) {
-          const p = `${base}/${group}/${name}/${run}`;
-          assert(fs.existsSync(`${p}/data.json`), `Missing 'data.json' in ${p}`);
-
-          const data = loadTestRecord(`${p}/data.json`);
-
-          // Verify reference image existence
-          const reference = data.referenceImage;
-          const folder = referenceImagePath(group, name, hardware);
-          const fullReference = `${folder}/${reference}`;
-          assert(fs.existsSync(fullReference), `Missing reference file ${fullReference}`);
-          assert(
-            fs.existsSync(thumbnailForImage(fullReference)),
-            `Missing thumbnail for reference image ${fullReference}`
-          );
-
-          // Verify candidate image existence
-          const candidate = candidateImage(
-            group,
-            name,
-            hardware,
-            new Date(data.candidateImage)
-          );
-          assert(fs.existsSync(candidate), `Missing candidate file ${candidate}`);
-          assert(
-            fs.existsSync(thumbnailForImage(candidate)),
-            `Missing thumbnail for candidate image ${candidate}`
-          );
-
-          // Verify difference image existence
-          const difference = differenceImage(
-            group,
-            name,
-            hardware,
-            new Date(data.differenceImage)
-          );
-          assert(fs.existsSync(difference), `Missing difference file ${difference}`);
-          assert(
-            fs.existsSync(thumbnailForImage(difference)),
-            `Missing thumbnail for difference image ${difference}`
-          );
-        }
-      }
+    if (!fs.existsSync(image)) {
+      missing.push(`${kind} image ${image}`);
     }
+    if (!fs.existsSync(thumbnailForImage(image))) {
+      missing.push(`Thumbnail of ${kind} image ${image}`);
+    }
+  }
+
+  for (const { application, group, name, hardware, data } of allTestRuns()) {
+    verifyImage(
+      testReferenceImage(application, group, name, hardware, data),
+      'Reference'
+    );
+    verifyImage(candidateImage(application, group, name, hardware, data), 'Candidate');
+    verifyImage(differenceImage(application, group, name, hardware, data), 'Difference');
+  }
+
+  if (missing.length > 0) {
+    printAudit(`  ${missing.length} files are missing:`);
+    for (const file of missing.slice(0, MaxListedMissingFiles)) {
+      printAudit(`    ${file}`);
+    }
+    if (missing.length > MaxListedMissingFiles) {
+      printAudit(`    and ${missing.length - MaxListedMissingFiles} more`);
+    }
+    reportError(`${missing.length} files are missing in the data folder, see audit.txt`);
   }
 }
 
 /**
- * Loads all of the existing test results from the data folder as provided in the
- * configuration. It will iterate through all of the tests and will assert if one of the
- * test folders is malformed due to, for example, missing files.
+ * Computes the hashes of all candidate and difference images that do not have a hash in
+ * the database yet. This is only necessary for test runs that were migrated from the
+ * file-based storage, as the hashes of all newly submitted images are computed when they
+ * are submitted.
  */
-export function loadTestResults() {
-  printAudit('Loading test results');
+export async function backfillImageHashes() {
+  const Concurrency = 8;
 
-  const hardwares = fs.readdirSync(`${Config.data}/tests`);
-  for (const hardware of hardwares) {
-    const base = `${Config.data}/tests/${hardware}`;
+  for (const kind of ['candidate', 'difference'] as HashedImage[]) {
+    const images = imagesWithoutHash(kind);
+    if (images.length == 0) continue;
 
-    const groups = fs.readdirSync(base);
-    for (const group of groups) {
-      const names = fs.readdirSync(`${base}/${group}`);
-      for (const name of names) {
-        const runs = fs.readdirSync(`${base}/${group}/${name}`);
-        for (const run of runs) {
-          const p = `${base}/${group}/${name}/${run}`;
-          const files = fs.readdirSync(p);
-          assert(files.includes('data.json'), `No 'data.json' in ${p}`);
-          assert(files.includes('log.txt'), `No 'log.txt' in ${p}`);
-
-          const data = loadTestRecord(`${p}/data.json`);
-          addTestData(group, name, hardware, data, false);
+    printAudit(`Computing the hashes of ${images.length} ${kind} images`);
+    const hashes: { image: (typeof images)[number]; hash: string }[] = [];
+    let missing = 0;
+    let next = 0;
+    async function work() {
+      while (next < images.length) {
+        const image = images[next]!;
+        next++;
+        const { application, group, name, hardware, owner } = image;
+        const file = `${testPath(application, group, name, hardware, owner)}/${kind}.png`;
+        if (!fs.existsSync(file)) {
+          missing++;
+          continue;
+        }
+        hashes.push({ image: image, hash: await pixelHash(file) });
+        if (hashes.length % 1000 == 0) {
+          console.log(`  ${hashes.length} / ${images.length}`);
         }
       }
     }
+    await Promise.all(Array.from({ length: Concurrency }, work));
+
+    inTransaction(() => {
+      for (const { image, hash } of hashes) {
+        const { application, group, name, hardware, owner } = image;
+        setImageHash(kind, application, group, name, hardware, owner, hash);
+      }
+    });
+    printAudit(`  Computed ${hashes.length} hashes, ${missing} images are missing`);
   }
+}
+
+/**
+ * Whether the test results are currently being regenerated
+ */
+let Regenerating = false;
+
+/**
+ * Whether a running regeneration should stop after the current test
+ */
+let StopRequested = false;
+
+/**
+ * Returns whether the test results are currently being regenerated.
+ */
+export function isRegenerating(): boolean {
+  return Regenerating;
+}
+
+/**
+ * Starts to regenerate all test results in the background, see `regenerateTestResults`.
+ *
+ * @returns `true` if the regeneration was started, `false` if a regeneration is already
+ *          running
+ */
+export function startRegeneration(): boolean {
+  if (Regenerating) {
+    return false;
+  }
+
+  Regenerating = true;
+  StopRequested = false;
+  regenerateTestResults()
+    .catch((err: unknown) => {
+      reportError(
+        `Regenerating the test results failed: ${err instanceof Error ? err.message : err}`
+      );
+    })
+    .finally(() => {
+      Regenerating = false;
+    });
+  return true;
+}
+
+/**
+ * Asks a running regeneration to stop after the test that it is currently working on.
+ */
+export function stopRegeneration() {
+  StopRequested = true;
 }
 
 /**
  * This function will regenerate all of the difference images that are locally stored and
  * update the pixel error values in all tests. In general this should only be necessary if
  * the version of the image diff tool has been updated or if the global image threshold
- * limit has changed.
+ * limit has changed. The tests are regenerated one after another while holding the lock
+ * of the respective test, so test runs can still be submitted in the meantime.
  */
 export async function regenerateTestResults() {
   printAudit('Regenerating all test results');
 
-  const hardwares = fs.readdirSync(`${Config.data}/tests`);
-  for (const hardware of hardwares) {
-    const base = `${Config.data}/tests/${hardware}`;
+  const tests = allTests();
+  for (const [i, test] of tests.entries()) {
+    if (StopRequested) {
+      printAudit(`  Regeneration stopped after ${i} of ${tests.length} tests`);
+      return;
+    }
 
-    const groups = fs.readdirSync(base);
-    for (const group of groups) {
-      const names = fs.readdirSync(`${base}/${group}`);
-      for (const name of names) {
-        const runs = fs.readdirSync(`${base}/${group}/${name}`);
-        for (const run of runs) {
-          const p = `${base}/${group}/${name}/${run}`;
+    const { application, group, name, hardware } = test;
+    await TestLocks.run(testLockKey(application, group, name, hardware), () =>
+      regenerateTest(test)
+    );
+    await yieldToEventLoop();
 
-          const data = loadTestRecord(`${p}/data.json`);
-          const folder = referenceImagePath(group, name, hardware);
-          const diff = await saveComparisonImage(
-            `${folder}/${data.referenceImage}`,
-            `${p}/candidate.png`,
-            `${p}/difference.png`
-          );
-
-          // Remove the old thumbnail of the difference image
-          const diffThumbnail = thumbnailForImage(`${p}/difference.png`);
-          fs.unlinkSync(diffThumbnail);
-
-          // And regenerate it
-          createThumbnail(`${p}/difference.png`);
-
-          data.pixelError = diff!;
-          saveTestData(data, `${p}/data.json`);
-        }
-      }
+    if ((i + 1) % 100 == 0) {
+      console.log(`  Regenerated ${i + 1} / ${tests.length} tests`);
     }
   }
 
-  // Reset the local records and load a fresh version from disk
-  reloadTestResults();
+  printAudit(`  Regenerated all ${tests.length} tests`);
 }
 
 /**
- * Reloads all of the test results from disk. This should be called whenever any testdata
- * file has been rewritten.
+ * Regenerates the difference images and pixel errors of all test runs of a single test.
+ *
+ * @param test The test whose results should be regenerated
  */
-export function reloadTestResults() {
-  TestRecords = [];
-  loadTestResults();
+async function regenerateTest(test: TestKeyParts) {
+  const { application, group, name, hardware } = test;
+
+  // Test runs that use the same reference and candidate image end up with the same
+  // difference image. So we only generate it once and store it in the folder of the
+  // earliest of these test runs
+  const runGroups = new Map<string, TestData[]>();
+  const previousDifferences = new Set<string>();
+  for (const data of testHistory(application, group, name, hardware)) {
+    const key = JSON.stringify([data.referenceImage, data.candidateImage.getTime()]);
+    const runs = runGroups.get(key);
+    if (runs) {
+      runs.push(data);
+    } else {
+      runGroups.set(key, [data]);
+    }
+    previousDifferences.add(differenceImage(application, group, name, hardware, data));
+  }
+
+  const updates: { data: TestData; pixelError: number; owner: Date; hash: string }[] = [];
+  const currentDifferences = new Set<string>();
+  for (const runs of runGroups.values()) {
+    // The runs are sorted by timestamp, so the first one is the earliest
+    const data = runs[0]!;
+    const reference = testReferenceImage(application, group, name, hardware, data);
+    const candidate = candidateImage(application, group, name, hardware, data);
+
+    let comparison: { image: PNG; error: number } | null = null;
+    if (fs.existsSync(reference) && fs.existsSync(candidate)) {
+      comparison = compareImages(readPng(reference), readPng(candidate));
+    }
+    if (comparison == null) {
+      // The images are missing or have different sizes, which can't happen for submitted
+      // tests. We keep the previous results for these test runs
+      printAudit(
+        `  Could not compare the images of (${application}/${group}/${name}/${hardware})`
+      );
+      for (const run of runs) {
+        currentDifferences.add(differenceImage(application, group, name, hardware, run));
+      }
+      continue;
+    }
+
+    const folder = testPath(application, group, name, hardware, data.timeStamp);
+    fs.mkdirSync(folder, { recursive: true });
+    const difference = `${folder}/difference.png`;
+    const buffer = PNG.sync.write(comparison.image);
+    fs.writeFileSync(difference, buffer);
+    await createThumbnail(difference);
+    const hash = await pixelHash(buffer);
+
+    currentDifferences.add(difference);
+    for (const run of runs) {
+      updates.push({
+        data: run,
+        pixelError: comparison.error,
+        owner: data.timeStamp,
+        hash: hash
+      });
+    }
+    await yieldToEventLoop();
+  }
+
+  inTransaction(() => {
+    for (const { data, pixelError, owner, hash } of updates) {
+      updateTestRun(
+        application,
+        group,
+        name,
+        hardware,
+        { ...data, pixelError: pixelError, differenceImage: owner },
+        hash
+      );
+    }
+  });
+
+  // Remove the difference images that are no longer used by any test run
+  for (const image of previousDifferences) {
+    if (currentDifferences.has(image)) continue;
+
+    for (const file of [image, thumbnailForImage(image)]) {
+      fs.rmSync(file, { force: true });
+    }
+    removeFolderIfEmpty(path.dirname(image));
+  }
 }

@@ -22,49 +22,61 @@
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                         *
  ****************************************************************************************/
 
+import { Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
 
-/**
- * Rate limiter middleware for API endpoints
- * Default: 100 requests per minute
- */
-export const apiLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000'),
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
-  message: {
-    error: 'Too many requests from this IP, please try again later.',
-    retryAfter: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000') / 1000
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+import { Config } from '../configuration';
 
 /**
- * Stricter rate limiter for authentication-related endpoints
- * Default: 10 requests per minute
+ * The number of failed authentication attempts that a client can make per time window
  */
-export const authLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000'),
-  max: 10,
-  message: {
-    error: 'Too many authentication attempts, please try again later.',
-    retryAfter: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000') / 1000
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+const MaxFailedAttempts = 10;
 
 /**
- * Minimal rate limiter for public endpoints
- * Default: 500 requests per minute
+ * Creates the rate limiters that protect the API. This has to be called after the
+ * configuration has been loaded, as the limits are taken from it.
+ *
+ * @returns The rate limiters for the different kinds of API calls
  */
-export const publicLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000'),
-  max: 500,
-  message: {
-    error: 'Too many requests, please slow down.',
-    retryAfter: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000') / 1000
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+export function createLimiters() {
+  const { windowMs, maxRequests } = Config.rateLimit;
+
+  // Only failed authentication attempts count against the limit, so that the runners can
+  // submit a large number of tests and admins are not locked out by their own actions
+  const failedAuthentication = {
+    windowMs: windowMs,
+    limit: MaxFailedAttempts,
+    skipSuccessfulRequests: true,
+    requestWasSuccessful: (_req: unknown, res: Response) => res.statusCode !== 401,
+    standardHeaders: 'draft-8' as const,
+    legacyHeaders: false
+  };
+
+  return {
+    /// Limits the failed authentication attempts on the API calls that require the admin
+    /// token
+    admin: rateLimit({
+      ...failedAuthentication,
+      message: {
+        error: 'Too many failed authentication attempts, please try again later'
+      }
+    }),
+
+    /// Limits the failed authentication attempts on the API calls that require a runner id
+    runner: rateLimit({
+      ...failedAuthentication,
+      message: {
+        error: 'Too many failed authentication attempts, please try again later'
+      }
+    }),
+
+    /// Limits the API calls that generate new comparison images, which are expensive
+    compare: rateLimit({
+      windowMs: windowMs,
+      limit: maxRequests,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      message: { error: 'Too many requests, please slow down' }
+    })
+  };
+}

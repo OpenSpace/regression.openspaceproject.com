@@ -1,114 +1,140 @@
-import { ActionIcon, Anchor, Table, Text, Tooltip } from '@mantine/core';
+import { Anchor, Table, Text, Tooltip } from '@mantine/core';
 
 import { TestData, TestRecord } from '../types';
-import { timingDisplay } from '../utils';
+import { classifyValues, commitUrl, testLink, timingDisplay, Trend } from '../utils';
 
+import { CopyLinkButton } from './CopyLinkButton';
 import { ImageThumbnail } from './ImageThumbnail';
 import { PixelDiffNumber } from './PixelDiffNumber';
 
 interface Props {
   record: TestRecord;
+  /// The repository that the commit hashes of the record's application refer to
+  repository: string | null;
+  /// Increased whenever the images might have changed on the server
+  revision: number;
   onOpen: (record: TestRecord) => void;
 }
 
-enum Trend {
-  Stable,
-  Improved,
-  Worsened,
-  Erratic
-};
+/**
+ * The number of most recent test runs that are used to determine the trends
+ */
+const TrendLength = 5;
 
-function classifyValues(data: TestData[]): Trend {
-  // `data` has the last up to 5 values
-  if (data.length <= 1) return Trend.Stable;
-
-  const errors = data.map((d) => d.pixelError);
-  const diffs = errors.slice(1).map((v, i) => v - errors[i]);
-
-  const anyIncrease = diffs.some((d) => d > 0);
-  const anyDecrease = diffs.some((d) => d < 0);
-
-  if (!anyIncrease && !anyDecrease) return Trend.Stable;
-  if (anyIncrease && anyDecrease) return Trend.Erratic;
-  if (anyDecrease) return Trend.Improved;
-  return Trend.Worsened;
+/**
+ * Returns the color, text, and tooltip describing the pixel error of the last test runs.
+ */
+function errorTrend(data: TestData[]): [string, string, string] {
+  const runs = `the last ${data.length} test runs`;
+  switch (classifyValues(data.map((d) => d.pixelError))) {
+    case Trend.Improved:
+      return ['green', '↓ Improved', `Pixel error of ${runs} has improved`];
+    case Trend.Worsened:
+      return ['red', '↑ Worsened', `Pixel error of ${runs} has gotten worse`];
+    case Trend.Erratic:
+      return ['yellow', '~ Erratic', `Pixel error of ${runs} is going up and down`];
+    case Trend.Stable:
+    default:
+      return ['dimmed', '● Stable', `Pixel error of ${runs} is unchanged`];
+  }
 }
 
-function logErrorsTrend(data: TestData[]): boolean {
-  // Returns `true` if the number of log errors are acceptable, meaning that the last
-  // entry has 0 errors **and** the number of log errors has been decreasing. Will return
-  // `false` otherwise
-  if (data.length === 0) return true;
-  const vals = data.map((d) => d.nErrors);
-  if (vals[vals.length - 1] !== 0) return false;
-  const diffs = vals.slice(1).map((v, i) => v - vals[i]);
-  return !diffs.some((d) => d > 0);
+/**
+ * Returns the color, text, and tooltip describing the number of log errors of the last
+ * test runs.
+ */
+function logTrend(data: TestData[]): [string, string, string] {
+  const latest = data[data.length - 1]?.nErrors ?? 0;
+  if (latest === 0) {
+    return ['dimmed', 'No errors', 'No errors in the log of the latest test run'];
+  }
+
+  const errors = latest === 1 ? '1 error' : `${latest} errors`;
+  const runs = `the last ${data.length} test runs`;
+  switch (classifyValues(data.map((d) => d.nErrors))) {
+    case Trend.Improved:
+      return ['yellow', `↓ ${errors}`, `The number of log errors decreased over ${runs}`];
+    case Trend.Worsened:
+      return ['red', `↑ ${errors}`, `The number of log errors increased over ${runs}`];
+    case Trend.Erratic:
+      return ['red', `~ ${errors}`, `The number of log errors changed over ${runs}`];
+    case Trend.Stable:
+    default:
+      return [
+        'orange',
+        `● ${errors}`,
+        `The number of log errors is unchanged over ${runs}`
+      ];
+  }
 }
 
-export function TestRow({ record, onOpen }: Props) {
-  if (record.data.length == 0) return null;
-
+export function TestRow({ record, repository, revision, onOpen }: Props) {
   const latestData = record.data[record.data.length - 1];
   if (!latestData) return null;
 
-
-
   const ImageWidth = 250;
 
-  function copyLink(e: React.MouseEvent) {
-    e.stopPropagation();
-    const url = new URL(window.location.href);
-    url.search = '';
-    url.searchParams.set('group', record.group);
-    url.searchParams.set('name', record.name);
-    url.searchParams.set('hardware', record.hardware);
-    navigator.clipboard.writeText(url.toString());
-  }
-
-  let lastValues = record.data.slice(record.data.length - 5);
-  let diffTrend = classifyValues(lastValues);
-  const [diffColor, diffText, diffTooltip] = (function (trend: Trend) {
-    switch (trend) {
-      case Trend.Stable:
-        return ['dimmed', '● Stable', 'Pixel error of the last 5 tests is unchanged'];
-      case Trend.Improved:
-        return ['green', '↓ Improved', 'Pixel error of the last 5 tests has improved'];
-      case Trend.Worsened:
-        return ['red', '↑ Worsened', 'Pixel error of the last 5 tests has gotten worse'];
-      case Trend.Erratic:
-        return ['yellow', '~ Erratic', 'Pixel error of the last 5 tests is going up and down'];
-    }
-  })(diffTrend);
-
-  const nErrorsTrendGood = logErrorsTrend(lastValues);
-  const [nErrorsColor, nErrorsText, nErrorsTooltip] =
-    nErrorsTrendGood ?
-    ['dimmed', 'No errors', 'No log errors reported'] :
-    ['red', `${latestData.nErrors} errors`, 'Log errors have worsened'];
+  const lastValues = record.data.slice(-TrendLength);
+  const [diffColor, diffText, diffTooltip] = errorTrend(lastValues);
+  const [nErrorsColor, nErrorsText, nErrorsTooltip] = logTrend(lastValues);
+  const commit = commitUrl(repository, latestData.commitHash);
+  const label = `${record.application} / ${record.group} / ${record.name} on ${record.hardware}`;
 
   return (
-    <Table.Tr style={{ cursor: 'pointer' }} onClick={() => onOpen(record)}>
+    <Table.Tr
+      style={{ cursor: 'pointer' }}
+      tabIndex={0}
+      aria-label={`Show the history of ${label}`}
+      onClick={() => onOpen(record)}
+      onKeyDown={(e: React.KeyboardEvent) => {
+        if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          onOpen(record);
+        }
+      }}
+    >
       <Table.Td style={{ width: 75, maxWidth: 75, whiteSpace: 'nowrap' }}>
         <PixelDiffNumber value={latestData.pixelError} />
         <Tooltip label={diffTooltip} withArrow>
-          <Text size={'xs'} c={diffColor}>{diffText}</Text>
+          <Text size={'xs'} c={diffColor}>
+            {diffText}
+          </Text>
         </Tooltip>
         <Tooltip label={nErrorsTooltip} withArrow>
-          <Text size={'xs'} c={nErrorsColor}>{nErrorsText}</Text>
+          <Text size={'xs'} c={nErrorsColor}>
+            {nErrorsText}
+          </Text>
         </Tooltip>
       </Table.Td>
-      <Table.Td style={{ width: 200, maxWidth: 200, wordBreak: 'break-word' }}>{record.group}</Table.Td>
-      <Table.Td style={{ width: 200, maxWidth: 200, wordBreak: 'break-word' }}>{record.name}</Table.Td>
-      <Table.Td style={{ width: 100, maxWidth: 100, wordBreak: 'break-word' }}>{record.hardware}</Table.Td>
-      <Table.Td style={{ width: 100, maxWidth: 100, wordBreak: 'break-word' }}>{timingDisplay(latestData.timing)}</Table.Td>
       <Table.Td style={{ width: 100, maxWidth: 100, wordBreak: 'break-word' }}>
-        <Anchor
-          href={`https://github.com/OpenSpace/OpenSpace/commit/${latestData.commitHash}`}
-          target={'_blank'}
-          onClick={(e: React.MouseEvent) => e.stopPropagation()}
-        >
-          {latestData.commitHash.substring(0, 8)}
-        </Anchor>
+        {record.application}
+      </Table.Td>
+      <Table.Td style={{ width: 200, maxWidth: 200, wordBreak: 'break-word' }}>
+        {record.group}
+      </Table.Td>
+      <Table.Td style={{ width: 200, maxWidth: 200, wordBreak: 'break-word' }}>
+        {record.name}
+      </Table.Td>
+      <Table.Td style={{ width: 100, maxWidth: 100, wordBreak: 'break-word' }}>
+        {record.hardware}
+      </Table.Td>
+      <Table.Td style={{ width: 100, maxWidth: 100, wordBreak: 'break-word' }}>
+        {timingDisplay(latestData.timing)}
+      </Table.Td>
+      <Table.Td style={{ width: 100, maxWidth: 100, wordBreak: 'break-word' }}>
+        {commit ? (
+          <Anchor
+            href={commit}
+            target={'_blank'}
+            rel={'noopener noreferrer'}
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
+            onKeyDown={(e: React.KeyboardEvent) => e.stopPropagation()}
+          >
+            {latestData.commitHash.substring(0, 8)}
+          </Anchor>
+        ) : (
+          <Text>{latestData.commitHash.substring(0, 8)}</Text>
+        )}
       </Table.Td>
       <Table.Td style={{ width: 100, maxWidth: 100, wordBreak: 'break-word' }}>
         <Text>
@@ -118,48 +144,20 @@ export function TestRow({ record, onOpen }: Props) {
         </Text>
       </Table.Td>
       <Table.Td style={{ width: 50, maxWidth: 50, wordBreak: 'break-word' }}>
-        <Tooltip label={'Copy link'} withArrow>
-          <ActionIcon
-            variant={'subtle'}
-            size={'xs'}
-            mt={4}
-            onClick={copyLink}
-            aria-label={'Copy link to this test'}
-          >
-            🔗
-          </ActionIcon>
-        </Tooltip>
+        <CopyLinkButton link={() => testLink(record)} label={`Copy link to ${label}`} />
       </Table.Td>
-      <Table.Td style={{ width: ImageWidth }}>
-        <ImageThumbnail
-          type={'candidate'}
-          group={record.group}
-          name={record.name}
-          hardware={record.hardware}
-          stopPropagation
-          width={ImageWidth}
-        />
-      </Table.Td>
-      <Table.Td style={{ width: ImageWidth }}>
-        <ImageThumbnail
-          type={'reference'}
-          group={record.group}
-          name={record.name}
-          hardware={record.hardware}
-          stopPropagation
-          width={ImageWidth}
-        />
-      </Table.Td>
-      <Table.Td style={{ width: ImageWidth }}>
-        <ImageThumbnail
-          type={'difference'}
-          group={record.group}
-          name={record.name}
-          hardware={record.hardware}
-          stopPropagation
-          width={ImageWidth}
-        />
-      </Table.Td>
+      {['candidate', 'reference', 'difference'].map((type) => (
+        <Table.Td key={type} style={{ width: ImageWidth }}>
+          <ImageThumbnail
+            type={type}
+            test={record}
+            timestamp={latestData.timeStamp}
+            revision={revision}
+            stopPropagation
+            width={ImageWidth}
+          />
+        </Table.Td>
+      ))}
     </Table.Tr>
   );
 }

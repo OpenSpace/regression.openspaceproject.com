@@ -22,130 +22,206 @@
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                         *
  ****************************************************************************************/
 
+import { createHash } from 'crypto';
 import fs from 'fs';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
-import resizeImg from 'resize-img';
+import sharp from 'sharp';
 
-import { assert } from './assert';
-import { printAudit } from './audit';
 import { Config } from './configuration';
+import { ValidationError } from './errors';
 import { thumbnailForImage } from './globals';
+import { MaxImageDimension } from './validation';
+
+// sharp keeps files open in its cache, which would prevent them from being deleted on
+// Windows
+sharp.cache(false);
+
+/**
+ * The largest number of pixels that an image may have
+ */
+const MaxPixels = MaxImageDimension * MaxImageDimension;
+
+/**
+ * The 8 bytes with which every PNG file starts
+ */
+const PngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Reads the size of a PNG image from its header without decoding the image.
+ *
+ * @param buffer The beginning of the PNG file; at least the first 24 bytes are needed
+ * @returns The width and height in pixels or `null` if the buffer is not a PNG file
+ */
+export function pngHeaderSize(buffer: Buffer): { width: number; height: number } | null {
+  // The signature is followed by the IHDR chunk: 4 bytes length, 4 bytes type, and then
+  // the width and the height as 4 byte big-endian integers
+  if (
+    buffer.length < 24 ||
+    !buffer.subarray(0, 8).equals(PngSignature) ||
+    buffer.toString('ascii', 12, 16) !== 'IHDR'
+  ) {
+    return null;
+  }
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+/**
+ * Decodes a PNG image that was uploaded by a client. The size of the image is checked
+ * before it is decoded so that images that are too large are never loaded into memory.
+ *
+ * @param buffer The contents of the uploaded file
+ * @returns The decoded image
+ * @throws ValidationError if the file is not a valid PNG image or is too large
+ */
+export function decodeUploadedPng(buffer: Buffer): PNG {
+  const size = pngHeaderSize(buffer);
+  if (size == null) {
+    throw new ValidationError('The uploaded file is not a PNG image');
+  }
+  if (
+    size.width < 1 ||
+    size.height < 1 ||
+    size.width > MaxImageDimension ||
+    size.height > MaxImageDimension
+  ) {
+    throw new ValidationError(
+      `The image is ${size.width}x${size.height} pixels, but images can be at most ` +
+        `${MaxImageDimension}x${MaxImageDimension} pixels`
+    );
+  }
+
+  try {
+    return PNG.sync.read(buffer);
+  } catch (e: unknown) {
+    throw new ValidationError(
+      `Error loading image: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+}
+
+/**
+ * Loads the PNG image stored at `path`.
+ *
+ * @param path The path to the image, which has to exist and be a valid PNG file
+ * @returns The decoded image
+ */
+export function readPng(path: string): PNG {
+  return PNG.sync.read(fs.readFileSync(path));
+}
+
+/**
+ * Returns the size (width and height in pixels) of the PNG image stored at the provided
+ * `path`. Only the header of the file is read.
+ *
+ * @param path The path to the image for which to return the size
+ * @returns The width and height of the image in pixels
+ */
+export function imageSize(path: string): { width: number; height: number } {
+  const header = Buffer.alloc(24);
+  const fd = fs.openSync(path, 'r');
+  try {
+    fs.readSync(fd, header, 0, header.length, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  const size = pngHeaderSize(header);
+  if (size == null) {
+    throw new Error(`File ${path} is not a PNG image`);
+  }
+  return size;
+}
+
+/**
+ * Computes a hash of the pixels of an image, which is used to find identical images. The
+ * hash covers the size and the 8-bit RGBA values of all pixels, so images that are
+ * encoded differently but show exactly the same pixels have the same hash.
+ *
+ * @param image The path to a PNG file or the contents of a PNG file
+ * @returns The SHA-256 hash of the image's pixels as a hexadecimal string
+ */
+export async function pixelHash(image: string | Buffer): Promise<string> {
+  // The file is read by Node instead of sharp, as sharp cannot open paths that are longer
+  // than 260 characters on Windows
+  const input = typeof image === 'string' ? await fs.promises.readFile(image) : image;
+  const { data, info } = await sharp(input, { limitInputPixels: MaxPixels })
+    .toColourspace('srgb')
+    .ensureAlpha()
+    .raw({ depth: 'uchar' })
+    .toBuffer({ resolveWithObject: true });
+
+  return createHash('sha256')
+    .update(`${info.width}x${info.height}\n`)
+    .update(data)
+    .digest('hex');
+}
 
 /**
  * Runs an image comparison to compare the `reference` image with the `candidate` image.
- * The result is returned as a Buffer and the percentage of pixels that are different
- * between the two images. The `reference` and `candidate` images must have the same size.
+ * The `reference` and `candidate` images must have the same size.
  *
- * @param reference The path to the reference image. This path must exist and be a valid
- *                  PNG file
- * @param candidate The path to the candidate image. This path must exist and be a valid
- *                  PNG file
- * @returns A buffer containing the difference image and the percentage of pixels that are
- *          changed between the reference and the candidate image. Returns `null` if the
- *          images had the wrong size
+ * @param reference The reference image
+ * @param candidate The candidate image
+ * @returns The difference image and the ratio of pixels that are changed between the
+ *          reference and the candidate image. Returns `null` if the images have different
+ *          sizes
  */
-export function generateComparisonImage(
-  reference: string,
-  candidate: string
-): [PNG, number] | null {
-  assert(fs.existsSync(reference), `No reference ${reference}`);
-  assert(fs.existsSync(candidate), `No candidate ${candidate}`);
-
-  printAudit(`Creating comparison: "${reference}" & "${candidate}"`);
-
-  const refImg = PNG.sync.read(fs.readFileSync(reference));
-  if (refImg.width != Config.size.width || refImg.height != Config.size.height) {
+export function compareImages(
+  reference: PNG,
+  candidate: PNG
+): { image: PNG; error: number } | null {
+  if (reference.width != candidate.width || reference.height != candidate.height) {
     return null;
   }
 
-  const testImg = PNG.sync.read(fs.readFileSync(candidate));
-  if (testImg.width != Config.size.width || testImg.height != Config.size.height) {
-    return null;
-  }
-
-  const { width } = Config.size;
-  const { height } = Config.size;
-  const diffImg = new PNG({ width, height });
-  const nPixels = pixelmatch(refImg.data, testImg.data, diffImg.data, width, height, {
+  const { width, height } = reference;
+  const image = new PNG({ width, height });
+  const nPixels = pixelmatch(reference.data, candidate.data, image.data, width, height, {
     threshold: Config.comparisonThreshold
   });
 
-  const diff = nPixels / (width * height);
-  return [diffImg, diff];
+  return { image: image, error: nPixels / (width * height) };
 }
 
 /**
- * Runs an image comparison to compare the `path1` image with the `path2` image and return
- * whether those two images are pixel-identical. Both images have to exist and be readable
- * PNG files.
- *
- * @param path1 The first image to test
- * @param path2 The second image to test
- * @returns `true` if `path1 == path2`, `false` otherwise
+ * Returns a message that describes that two images have different sizes.
  */
-export function imagesAreEqual(path1: string, path2: string): boolean {
-  assert(fs.existsSync(path1), `No image ${path1}`);
-  assert(fs.existsSync(path2), `No image ${path2}`);
-
-  const i1 = PNG.sync.read(fs.readFileSync(path1));
-  const i2 = PNG.sync.read(fs.readFileSync(path2));
-  if (i1.width != i2.width || i1.height != i2.height) {
-    // The images are considered different if they have a difference resolution
-    return false;
-  }
-
-  const diff = pixelmatch(i1.data, i2.data, null, i1.width, i1.height, { threshold: 0 });
-  return diff == 0;
-}
-
-/**
- * Runs an image comparison to compare the `reference` image with the `candidate` image.
- * The result is stored in the `difference` image. Both the `reference` and `candidate`
- * parameters need to point towards PNG files that exist and that are readable. Any
- * existing file at the path `difference` will be silently overwritten with the new image
- * result. This function will also generate a thumbnail of the comparison image. The
- * `reference` and `candidate` images must have the same size.
- *
- * @param reference The path to the reference image. This path must exist and be a valid
- *                  PNG file
- * @param candidate The path to the candidate image. This path must exist and be a valid
- *                  PNG file
- * @param difference The path to where the difference image is stored by this function
- * @returns The percentage of pixels that are changed between the reference and the
- *          candidate image or `null` if the images had the wrong size
- */
-export async function saveComparisonImage(
-  reference: string,
-  candidate: string,
-  difference: string
-): Promise<number | null> {
-  const res = await generateComparisonImage(reference, candidate);
-  if (res == null) {
-    return null;
-  }
-
-  const [img, nPixels] = res;
-
-  fs.writeFileSync(difference, PNG.sync.write(img));
-  await createThumbnail(difference);
-  return nPixels;
+export function resolutionMismatch(
+  reference: { width: number; height: number },
+  candidate: { width: number; height: number }
+): string {
+  return (
+    `Resolution mismatch: reference is ${reference.width}x${reference.height}, ` +
+    `candidate is ${candidate.width}x${candidate.height}`
+  );
 }
 
 /**
  * Creates a thumbnail for the image provided by the `path`. The path has to be a valid
  * filepath to a file that exists. The image is scaled down by the value specified in the
  * global configuration file. The thumbnail is stored at a location that is generated by
- * the `thumbnailForImage` function.
+ * the `thumbnailForImage` function. The thumbnail preserves the aspect ratio of the
+ * original image, which does not have to match the global image size.
  *
  * @param path The path to the file for which a thumbnail should be created
+ * @returns The path to the thumbnail
  */
-export async function createThumbnail(path: string) {
-  assert(fs.existsSync(path), `No path ${path} found`);
-
-  const thumbnailPath = thumbnailForImage(path);
-  const width = Config.size.width / Config.thumbnailScale;
-  const height = Config.size.height / Config.thumbnailScale;
-  const image = await resizeImg(fs.readFileSync(path), { width: width, height: height });
-  fs.writeFileSync(thumbnailPath, image);
+export async function createThumbnail(path: string): Promise<string> {
+  const thumbnail = thumbnailForImage(path);
+  const { width, height } = imageSize(path);
+  // The files are read and written by Node instead of sharp, as sharp cannot open paths
+  // that are longer than 260 characters on Windows
+  const image = await sharp(await fs.promises.readFile(path), {
+    limitInputPixels: MaxPixels
+  })
+    .resize({
+      width: Math.max(1, Math.round(width / Config.thumbnailScale)),
+      height: Math.max(1, Math.round(height / Config.thumbnailScale)),
+      fit: 'fill'
+    })
+    .png()
+    .toBuffer();
+  await fs.promises.writeFile(thumbnail, image);
+  return thumbnail;
 }

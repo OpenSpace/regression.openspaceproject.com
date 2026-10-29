@@ -22,33 +22,20 @@
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                                         *
  ****************************************************************************************/
 
-import { WebClient } from '@slack/web-api';
-
-import { Config } from './configuration';
+import { reportError } from './errorHandling';
 
 /**
- * A more sophisticated version of console.assert. It checks the state of the provided
- * `condition`. If it is `true`, this function does nothing. If it is false, it will print
- * an error message to the log and if the Slack integration is configured, it will also
- * print a message to the provided channel.
+ * Checks an invariant of the server. If the `condition` is `false`, the problem is
+ * reported (in the log and, if configured, on Slack) and an error is thrown, so that the
+ * code after the assertion never runs with a violated invariant.
  *
  * @param condition The condition that should be checked
- * @param message The message that will be printed if the @param condition is `false`
+ * @param message The message that is reported and thrown if the `condition` is `false`
  */
-export function assert(condition: boolean, message: string) {
+export function assert(condition: boolean, message: string): asserts condition {
   if (condition) return;
 
-  console.error(`Assertion failed: ${message}`);
-
-  if (Config.slackToken != '') {
-    const web = new WebClient(Config.slackToken);
-
-    (async () => {
-      const response = await web.chat.postMessage({
-        channel: Config.slackChannel,
-        text: message
-      });
-      console.log(response);
-    })();
-  }
+  const text = `Assertion failed: ${message}`;
+  reportError(text);
+  throw new Error(text);
 }

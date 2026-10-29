@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   Anchor,
   Box,
   Button,
   Group,
+  Loader,
   Select,
   Table,
   Text,
@@ -12,49 +13,86 @@ import {
   Title
 } from '@mantine/core';
 
-import { TestRecord } from '../types';
+import { compareUrl, errorMessage, fetchConfig, fetchJson, resultUrl } from '../api';
 import { PixelDiffNumber } from '../components/PixelDiffNumber';
+import { TestRecord } from '../types';
 
 type ImageType = 'reference' | 'candidate';
 
+/**
+ * The width of the images in the comparison table. The height follows from the aspect
+ * ratio of the images
+ */
+const ImageWidth = 150;
+
+function parseImageType(value: string | null): ImageType {
+  return value === 'candidate' ? 'candidate' : 'reference';
+}
+
 interface Props {
   type: string;
+  application: string;
   group: string;
   name: string;
   hardware1: string;
   hardware2: string;
 }
 
-function CompareCell({ type, group, name, hardware1, hardware2 }: Props) {
+function CompareCell({ type, application, group, name, hardware1, hardware2 }: Props) {
+  const [image, setImage] = useState<string | null>(null);
   const [pixelError, setPixelError] = useState<number | null>(null);
-  const compareUrl = `/api/compare/${type}/${group}/${name}/${hardware1}/${hardware2}`;
+  const [error, setError] = useState<string | null>(null);
 
+  // The comparison is expensive, so it is only requested once and the image is shown
+  // from the downloaded data instead of requesting it a second time through the <img>
   useEffect(() => {
-    fetch(compareUrl)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        setPixelError(Number(res.headers.get('result')));
+    const url = compareUrl(type, application, group, name, hardware1, hardware2);
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+
+    fetch(url, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await errorMessage(res));
+        const result = res.headers.get('result');
+        setPixelError(result !== null ? Number(result) : null);
+        objectUrl = URL.createObjectURL(await res.blob());
+        setImage(objectUrl);
       })
-      .catch((err) => {
-        console.error(`Failed to load comparison ${compareUrl}:`, err);
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        console.error(`Failed to load comparison ${url}:`, err);
+        setError(err instanceof Error ? err.message : String(err));
       });
-  }, [compareUrl]);
+
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [type, application, group, name, hardware1, hardware2]);
 
   return (
     <Table.Td
       style={{
-        backgroundColor: '#252525',
-        border: '0.5px solid #eeeeee',
+        backgroundColor: 'var(--mantine-color-dark-6)',
+        border: '0.5px solid var(--mantine-color-gray-3)',
         textAlign: 'center'
       }}
     >
-      <Anchor href={compareUrl} target={'_blank'}>
-        <img
-          src={compareUrl}
-          alt={`${hardware1} vs ${hardware2}`}
-          style={{ width: 150, height: 84.375 }}
-        />
-      </Anchor>
+      {image == null && error == null && <Loader size={'sm'} />}
+      {error != null && (
+        <Text size={'xs'} c={'red'} maw={ImageWidth}>
+          {error}
+        </Text>
+      )}
+      {image != null && (
+        <Anchor href={image} target={'_blank'}>
+          <img
+            src={image}
+            alt={`Difference between ${hardware1} and ${hardware2}`}
+            style={{ width: ImageWidth, height: 'auto', display: 'block' }}
+          />
+        </Anchor>
+      )}
       {pixelError !== null && <PixelDiffNumber value={pixelError} />}
     </Table.Td>
   );
@@ -62,65 +100,93 @@ function CompareCell({ type, group, name, hardware1, hardware2 }: Props) {
 
 export default function Compare() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [application, setApplication] = useState(
+    searchParams.get('application') ?? 'openspace'
+  );
+  const [applications, setApplications] = useState<string[]>(['openspace']);
   const [group, setGroup] = useState(searchParams.get('group') ?? '');
   const [name, setName] = useState(searchParams.get('name') ?? '');
-  const [type, setType] = useState<ImageType>(
-    (searchParams.get('type') as ImageType | null) ?? 'reference'
-  );
+  const [type, setType] = useState<ImageType>(parseImageType(searchParams.get('type')));
   const [hardwares, setHardwares] = useState<string[]>([]);
-  const [hasResult, setHasResult] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [shareUrl, setShareUrl] = useState('');
 
-  // Track current generation params (separate from input state)
-  const resultParams = useRef({ group, name, type });
+  // The parameters of the comparison that is shown (separate from the input fields)
+  const [result, setResult] = useState<{
+    application: string;
+    group: string;
+    name: string;
+    type: ImageType;
+  } | null>(null);
 
-  async function generateComparison(g: string, n: string, t: ImageType) {
-    const records: TestRecord[] | null = await fetch('/api/test-records')
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchConfig(controller.signal)
+      .then((config) => {
+        if (config.applications.length > 0) {
+          setApplications(config.applications.map((app) => app.name));
+        }
       })
-      .catch((err) => {
-        console.error('Failed to generate comparison:', err);
-        return null;
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        console.error('Failed to load config:', err);
       });
-    if (!records) return;
-    const hwList = [...new Set(records.map((r) => r.hardware))].sort();
-    resultParams.current = { group: g, name: n, type: t };
-    setHardwares(hwList);
-    setHasResult(true);
-    const loc = `${location.protocol}//${location.host}${location.pathname}`;
-    setShareUrl(`${loc}?group=${g}&name=${n}&type=${t}`);
+    return () => controller.abort();
+  }, []);
+
+  function generateComparison(app: string, g: string, n: string, t: ImageType) {
+    fetchJson<TestRecord[]>('/api/test-records')
+      .then((records) => {
+        const hwList = [
+          ...new Set(records.filter((r) => r.application === app).map((r) => r.hardware))
+        ].sort();
+        setLoadError(null);
+        setResult({ application: app, group: g, name: n, type: t });
+        setHardwares(hwList);
+        const params = new URLSearchParams({
+          application: app,
+          group: g,
+          name: n,
+          type: t
+        });
+        setShareUrl(`${location.origin}${location.pathname}?${params.toString()}`);
+      })
+      .catch((err: unknown) => {
+        console.error('Failed to generate comparison:', err);
+        setLoadError(err instanceof Error ? err.message : String(err));
+      });
   }
 
   // Auto-generate if URL params are present on mount
   useEffect(() => {
+    const urlApplication = searchParams.get('application') ?? 'openspace';
     const urlGroup = searchParams.get('group');
     const urlName = searchParams.get('name');
-    const urlType = (searchParams.get('type') as ImageType | null) ?? 'reference';
+    const urlType = parseImageType(searchParams.get('type'));
     if (urlGroup && urlName) {
-      generateComparison(urlGroup, urlName, urlType);
+      generateComparison(urlApplication, urlGroup, urlName, urlType);
     }
     // Intentionally run only once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleGenerate() {
-    setSearchParams({ group, name, type });
-    generateComparison(group, name, type);
+    setSearchParams({ application, group, name, type });
+    generateComparison(application, group, name, type);
   }
-
-  const { group: rGroup, name: rName, type: rType } = resultParams.current;
 
   return (
     <Box>
       {/* Header */}
       <Box
-        py={'md'}
+        py={'xs'}
         style={{ textAlign: 'center', backgroundColor: 'var(--mantine-color-dark-7)' }}
       >
-        <Title order={1} style={{ fontVariant: 'small-caps' }}>
-          <Link to={'/'} style={{ textDecoration: 'none', color: 'white' }}>
+        <Title
+          order={2}
+          style={{ fontVariant: 'small-caps', fontFamily: 'Roboto, sans-serif' }}
+        >
+          <Link to={'/'} style={{ textDecoration: 'none', color: 'inherit' }}>
             OpenSpace Image Testing
           </Link>
         </Title>
@@ -132,6 +198,15 @@ export default function Compare() {
         align={'flex-end'}
         style={{ backgroundColor: 'var(--mantine-color-dark-6)' }}
       >
+        <Select
+          label={'Application'}
+          size={'sm'}
+          w={160}
+          value={application}
+          allowDeselect={false}
+          onChange={(val) => setApplication(val ?? 'openspace')}
+          data={applications.map((app) => ({ value: app, label: app }))}
+        />
         <TextInput
           label={'Group'}
           size={'sm'}
@@ -149,7 +224,8 @@ export default function Compare() {
           size={'sm'}
           w={160}
           value={type}
-          onChange={(val) => setType((val ?? 'reference') as ImageType)}
+          allowDeselect={false}
+          onChange={(val) => setType(parseImageType(val))}
           data={[
             { value: 'reference', label: 'Reference' },
             { value: 'candidate', label: 'Candidate' }
@@ -160,6 +236,12 @@ export default function Compare() {
         </Button>
       </Group>
 
+      {loadError && (
+        <Box px={'sm'} py={'xs'}>
+          <Text c={'red'}>Failed to load the tests: {loadError}</Text>
+        </Box>
+      )}
+
       {shareUrl && (
         <Box px={'sm'} py={'xs'}>
           <Anchor href={shareUrl} size={'sm'}>
@@ -168,50 +250,56 @@ export default function Compare() {
         </Box>
       )}
 
-      {hasResult && (
+      {result && (
         <Table id={'splom'} withColumnBorders withTableBorder>
           <Table.Tbody>
-            {hardwares.map((hw, i) => (
-              <Table.Tr key={hw}>
-                {/* Lower triangle: empty cells */}
-                {hardwares.slice(0, i).map((_, j) => (
-                  <Table.Td key={j} />
-                ))}
-                {/* Diagonal: single hardware image */}
-                <Table.Td
-                  style={{
-                    backgroundColor: '#252525',
-                    border: '0.5px solid #eeeeee',
-                    textAlign: 'center'
-                  }}
-                >
-                  <Anchor
-                    href={`/api/result/${rType}/${rGroup}/${rName}/${hw}`}
-                    target={'_blank'}
+            {hardwares.map((hw, i) => {
+              const test = {
+                application: result.application,
+                group: result.group,
+                name: result.name,
+                hardware: hw
+              };
+              return (
+                <Table.Tr key={hw}>
+                  {/* Lower triangle: empty cells */}
+                  {hardwares.slice(0, i).map((_, j) => (
+                    <Table.Td key={j} />
+                  ))}
+                  {/* Diagonal: single hardware image */}
+                  <Table.Td
+                    style={{
+                      backgroundColor: 'var(--mantine-color-dark-6)',
+                      border: '0.5px solid var(--mantine-color-gray-3)',
+                      textAlign: 'center'
+                    }}
                   >
-                    <img
-                      src={`/api/result/${rType}-thumbnail/${rGroup}/${rName}/${hw}`}
-                      alt={hw}
-                      style={{ width: 150, height: 84.375 }}
+                    <Anchor href={resultUrl(result.type, test)} target={'_blank'}>
+                      <img
+                        src={resultUrl(`${result.type}-thumbnail`, test)}
+                        alt={`${result.type} image on ${hw}`}
+                        style={{ width: ImageWidth, height: 'auto', display: 'block' }}
+                      />
+                    </Anchor>
+                    <Text size={'sm'} ta={'center'}>
+                      {hw}
+                    </Text>
+                  </Table.Td>
+                  {/* Upper triangle: cross-hardware comparisons */}
+                  {hardwares.slice(i + 1).map((hw2) => (
+                    <CompareCell
+                      key={hw2}
+                      type={result.type}
+                      application={result.application}
+                      group={result.group}
+                      name={result.name}
+                      hardware1={hw}
+                      hardware2={hw2}
                     />
-                  </Anchor>
-                  <Text size={'sm'} ta={'center'}>
-                    {hw}
-                  </Text>
-                </Table.Td>
-                {/* Upper triangle: cross-hardware comparisons */}
-                {hardwares.slice(i + 1).map((hw2) => (
-                  <CompareCell
-                    key={hw2}
-                    type={rType}
-                    group={rGroup}
-                    name={rName}
-                    hardware1={hw}
-                    hardware2={hw2}
-                  />
-                ))}
-              </Table.Tr>
-            ))}
+                  ))}
+                </Table.Tr>
+              );
+            })}
           </Table.Tbody>
         </Table>
       )}

@@ -6,11 +6,32 @@ export interface TestData {
   nErrors: number;
 }
 
-export interface TestRecord {
+/// The values that identify a single test
+export interface TestKey {
+  application: string;
   group: string;
   name: string;
   hardware: string;
+}
+
+export interface TestRecord extends TestKey {
+  /// The test runs sorted by timestamp. `/api/test-records` only returns the most recent
+  /// runs of each test; the full history is available from `/api/test-history`
   data: TestData[];
+}
+
+/// An application that submits tests to the server
+export interface Application {
+  name: string;
+  /// The URL of the repository that the commit hashes of the application refer to, or
+  /// `null` if it is not known
+  repository: string | null;
+}
+
+/// The configuration values returned by `/api/config`
+export interface AppConfig {
+  preferredHardware: string[];
+  applications: Application[];
 }
 
 export type SortColumn =
@@ -18,6 +39,7 @@ export type SortColumn =
   | 'timing'
   | 'commitHash'
   | 'timeStamp'
+  | 'application'
   | 'group'
   | 'name'
   | 'hardware';

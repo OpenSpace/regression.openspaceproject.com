@@ -1,37 +1,100 @@
-import { Anchor, Box, Button, Group, Modal, Stack, Table, Text } from '@mantine/core';
+import { useEffect, useState } from 'react';
+import {
+  Anchor,
+  Box,
+  Button,
+  Group,
+  Loader,
+  Modal,
+  Stack,
+  Table,
+  Text,
+  Tooltip
+} from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 
+import { fetchJson, historyUrl, resultUrl } from '../api';
 import { TestData, TestRecord } from '../types';
-import { timingDisplay } from '../utils';
+import { commitUrl, githubIssueUrl, timingDisplay } from '../utils';
 
 import { ImageThumbnail } from './ImageThumbnail';
-import { useState } from 'react';
-import { useDisclosure } from '@mantine/hooks';
 import { PixelDiffNumber } from './PixelDiffNumber';
 
 interface Props {
   record: TestRecord;
-  onUpdateReference: (record: TestRecord) => void;
+  /// The repository that the commit hashes of the record's application refer to
+  repository: string | null;
+  /// Increased whenever the images might have changed on the server
+  revision: number;
+  /// Whether an admin token was entered, which is needed to update the reference
+  canUpdateReference: boolean;
+  /// Updates the reference image and resolves to whether that was successful
+  onUpdateReference: (record: TestRecord) => Promise<boolean>;
 }
 
-export function TestHistory({ record, onUpdateReference }: Props) {
-  const [wasUpdated, setWasUpdated] = useState(false);
-  const [confirmOpened, { open, close }] = useDisclosure(false);
+/**
+ * The number of test runs that are shown at first and added by "Show more"
+ */
+const PageSize = 25;
 
-  const testData = [...record.data].reverse();
+export function TestHistory({
+  record,
+  repository,
+  revision,
+  canUpdateReference,
+  onUpdateReference
+}: Props) {
+  const [updating, setUpdating] = useState(false);
+  const [confirmOpened, { open, close }] = useDisclosure(false);
+  const [history, setHistory] = useState<TestData[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(PageSize);
+
+  // The record only contains the most recent test runs, so the full history is loaded
+  // when it is shown. It is loaded again when the record changes, for example after the
+  // reference image was updated
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchJson<TestData[]>(historyUrl(record), controller.signal)
+      .then((data) => {
+        setHistory(data);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        console.error('Failed to load the history:', err);
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => controller.abort();
+  }, [record]);
+
+  // The newest test run comes first
+  const testData = history ? [...history].reverse() : [];
+  const latest = record.data[record.data.length - 1];
 
   const ImageWidth = 250;
+
+  async function updateReference() {
+    close();
+    setUpdating(true);
+    try {
+      await onUpdateReference(record);
+    } finally {
+      setUpdating(false);
+    }
+  }
 
   return (
     <>
       <Modal
         opened={confirmOpened}
         onClose={close}
-        title="Are you sure?"
-        size="lg"
+        title={'Are you sure?'}
+        size={'lg'}
         withCloseButton
         centered
       >
-        <Stack align="center">
+        <Stack align={'center'}>
           <Text px={'md'}>
             Are you sure you want to update the reference image to the candidate for the
             test: {record.name}?{' '}
@@ -40,15 +103,14 @@ export function TestHistory({ record, onUpdateReference }: Props) {
             </Text>
           </Text>
 
-          <Group align={'center'} my={'sm'} wrap="nowrap">
+          <Group align={'center'} my={'sm'} wrap={'nowrap'}>
             <Stack align={'center'} gap={'xs'}>
               <Text>Candidate</Text>
               <ImageThumbnail
                 type={'candidate'}
-                group={record.group}
-                name={record.name}
-                hardware={record.hardware}
-                timestamp={testData[0].timeStamp}
+                test={record}
+                timestamp={latest?.timeStamp}
+                revision={revision}
                 width={ImageWidth}
               />
             </Stack>
@@ -57,34 +119,24 @@ export function TestHistory({ record, onUpdateReference }: Props) {
               <Text>Reference</Text>
               <ImageThumbnail
                 type={'reference'}
-                group={record.group}
-                name={record.name}
-                hardware={record.hardware}
-                timestamp={testData[0].timeStamp}
+                test={record}
+                timestamp={latest?.timeStamp}
+                revision={revision}
                 width={ImageWidth}
               />
             </Stack>
           </Group>
-          <Text>
-            Error: <PixelDiffNumber value={testData[0].pixelError} />
-          </Text>
+          {latest && (
+            <Text>
+              Error: <PixelDiffNumber value={latest.pixelError} />
+            </Text>
+          )}
 
-          <Text c={'dimmed'} size={'sm'} px={'md'}>
-            After updating, you may have to wait a few seconds and refresh the page to see
-            the updated reference.
-          </Text>
           <Group>
-            <Button
-              onClick={() => {
-                onUpdateReference(record);
-                setWasUpdated(true);
-                close();
-              }}
-              color="red"
-            >
+            <Button onClick={updateReference} color={'red'}>
               Yes, update reference
             </Button>
-            <Button onClick={close} variant="default" autoFocus>
+            <Button onClick={close} variant={'default'} autoFocus>
               Cancel
             </Button>
           </Group>
@@ -92,100 +144,140 @@ export function TestHistory({ record, onUpdateReference }: Props) {
       </Modal>
 
       <Box p={'md'} bg={'dark.8'}>
-        <Table
-          horizontalSpacing={'xs'}
-          verticalSpacing={4}
-          withTableBorder
-          withColumnBorders
-        >
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>Timestamp</Table.Th>
-              <Table.Th>Error</Table.Th>
-              <Table.Th>Commit</Table.Th>
-              <Table.Th>Timing</Table.Th>
-              <Table.Th>Log</Table.Th>
-              <Table.Th>Candidate</Table.Th>
-              <Table.Th>Reference</Table.Th>
-              <Table.Th>Difference</Table.Th>
-              <Table.Th />
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {testData.map((d: TestData, i: number) => (
-              <Table.Tr key={d.timeStamp}>
-                <Table.Td>
-                  <Text size={'sm'} c={'dimmed'}>
-                    {new Date(d.timeStamp).toISOString().split('T')[0]}
-                    <br />
-                    {new Date(d.timeStamp).toISOString().split('T')[1]?.replace('Z', '')}
-                  </Text>
-                </Table.Td>
-                <Table.Td>
-                  <PixelDiffNumber value={d.pixelError} />
-                </Table.Td>
-                <Table.Td>
-                  <Anchor
-                    href={`https://github.com/OpenSpace/OpenSpace/commit/${d.commitHash}`}
-                    target={'_blank'}
-                  >
-                    {d.commitHash.substring(0, 8)}
-                  </Anchor>
-                </Table.Td>
-                <Table.Td>
-                  <Text>{timingDisplay(d.timing)}</Text>
-                </Table.Td>
-                <Table.Td>
-                  <Anchor
-                    href={`/api/result/log/${record.group}/${record.name}/${record.hardware}/${d.timeStamp}`}
-                    target={'_blank'}
-                  >
-                    Log ({d.nErrors} errors)
-                  </Anchor>
-                </Table.Td>
-                <Table.Td>
-                  <ImageThumbnail
-                    type={'candidate'}
-                    group={record.group}
-                    name={record.name}
-                    hardware={record.hardware}
-                    timestamp={d.timeStamp}
-                    width={ImageWidth}
-                  />
-                </Table.Td>
-                <Table.Td>
-                  <ImageThumbnail
-                    type={'reference'}
-                    group={record.group}
-                    name={record.name}
-                    hardware={record.hardware}
-                    timestamp={d.timeStamp}
-                    width={ImageWidth}
-                  />
-                </Table.Td>
-                <Table.Td>
-                  <ImageThumbnail
-                    type={'difference'}
-                    group={record.group}
-                    name={record.name}
-                    hardware={record.hardware}
-                    timestamp={d.timeStamp}
-                    width={ImageWidth}
-                  />
-                </Table.Td>
-                <Table.Td>
-                  {i === 0 && (
-                    <>
-                      <Button variant={'default'} onClick={open} disabled={wasUpdated}>
-                        Upgrade Candidate to Reference
-                      </Button>
-                    </>
-                  )}
-                </Table.Td>
+        {history == null && error == null && (
+          <Group justify={'center'} p={'xl'}>
+            <Loader />
+          </Group>
+        )}
+        {error != null && <Text c={'red'}>Failed to load the test history: {error}</Text>}
+        {history != null && (
+          <Table
+            horizontalSpacing={'xs'}
+            verticalSpacing={4}
+            withTableBorder
+            withColumnBorders
+          >
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Timestamp</Table.Th>
+                <Table.Th>Error</Table.Th>
+                <Table.Th>Commit</Table.Th>
+                <Table.Th>Timing</Table.Th>
+                <Table.Th>Log</Table.Th>
+                <Table.Th>Candidate</Table.Th>
+                <Table.Th>Reference</Table.Th>
+                <Table.Th>Difference</Table.Th>
+                <Table.Th />
               </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
+            </Table.Thead>
+            <Table.Tbody>
+              {testData.slice(0, visibleCount).map((d: TestData, i: number) => {
+                const commit = commitUrl(repository, d.commitHash);
+                const issue = i === 0 ? githubIssueUrl(record, d, repository) : null;
+                return (
+                  <Table.Tr key={d.timeStamp}>
+                    <Table.Td>
+                      <Text size={'sm'} c={'dimmed'}>
+                        {new Date(d.timeStamp).toISOString().split('T')[0]}
+                        <br />
+                        {new Date(d.timeStamp)
+                          .toISOString()
+                          .split('T')[1]
+                          ?.replace('Z', '')}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <PixelDiffNumber value={d.pixelError} />
+                    </Table.Td>
+                    <Table.Td>
+                      {commit ? (
+                        <Anchor
+                          href={commit}
+                          target={'_blank'}
+                          rel={'noopener noreferrer'}
+                        >
+                          {d.commitHash.substring(0, 8)}
+                        </Anchor>
+                      ) : (
+                        <Text>{d.commitHash.substring(0, 8)}</Text>
+                      )}
+                    </Table.Td>
+                    <Table.Td>
+                      <Text>{timingDisplay(d.timing)}</Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Anchor
+                        href={resultUrl('log', record, d.timeStamp)}
+                        target={'_blank'}
+                      >
+                        Log ({d.nErrors} errors)
+                      </Anchor>
+                    </Table.Td>
+                    {['candidate', 'reference', 'difference'].map((type) => (
+                      <Table.Td key={type}>
+                        <ImageThumbnail
+                          type={type}
+                          test={record}
+                          timestamp={d.timeStamp}
+                          revision={revision}
+                          width={ImageWidth}
+                        />
+                      </Table.Td>
+                    ))}
+                    <Table.Td>
+                      {i === 0 && (
+                        <Stack gap={'xs'}>
+                          <Tooltip
+                            label={'Enter the admin token in the header first'}
+                            disabled={canUpdateReference}
+                            withArrow
+                          >
+                            {/* `data-disabled` instead of `disabled` keeps the tooltip working */}
+                            <Button
+                              variant={'default'}
+                              onClick={(e: React.MouseEvent) => {
+                                if (!canUpdateReference) {
+                                  e.preventDefault();
+                                  return;
+                                }
+                                open();
+                              }}
+                              loading={updating}
+                              data-disabled={canUpdateReference ? undefined : true}
+                            >
+                              Upgrade Candidate to Reference
+                            </Button>
+                          </Tooltip>
+                          {issue && (
+                            <Button
+                              component={'a'}
+                              href={issue}
+                              target={'_blank'}
+                              rel={'noopener noreferrer'}
+                              variant={'default'}
+                            >
+                              Create GitHub Issue
+                            </Button>
+                          )}
+                        </Stack>
+                      )}
+                    </Table.Td>
+                  </Table.Tr>
+                );
+              })}
+            </Table.Tbody>
+          </Table>
+        )}
+        {history != null && testData.length > visibleCount && (
+          <Group justify={'center'} mt={'md'}>
+            <Button
+              variant={'default'}
+              onClick={() => setVisibleCount((c) => c + PageSize)}
+            >
+              Show more ({testData.length - visibleCount} older test runs)
+            </Button>
+          </Group>
+        )}
       </Box>
     </>
   );

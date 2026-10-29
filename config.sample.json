@@ -1,16 +1,24 @@
 {
-  "port": 8000,
   "slack": {
     "token": "",
     "channel": ""
   },
   "comparisonThreshold": 0.1,
   "imageSize": { "width": 1920, "height": 1080 },
-  "thumbnailScale": 6,
-  "data": "data",
-  "adminToken": "",
-  "runners": [
-    ""
+  "applications": [
+    {
+      "name": "openspace",
+      "repository": "https://github.com/OpenSpace/OpenSpace",
+      "imageSize": { "width": 1920, "height": 1080 }
+    },
+    {
+      "name": "sgct",
+      "repository": "https://github.com/SGCT/SGCT",
+      "imageSize": null
+    }
   ],
+  "thumbnailScale": 6,
+  "adminToken": "",
+  "runners": [],
   "preferredHardware": []
 }
