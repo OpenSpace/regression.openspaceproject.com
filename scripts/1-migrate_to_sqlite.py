@@ -29,6 +29,9 @@ Usage:
   python scripts/1-migrate_to_sqlite.py --data-dir data --keep-files
 """
 
+# Allows the `int | None` annotations on Python 3.9, which the server is running
+from __future__ import annotations
+
 import argparse
 import json
 import math
