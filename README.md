@@ -80,7 +80,7 @@ The server stores the information about the test runs in the `testresults.db` da
 
 The script reads and validates all `data.json`, `log.txt`, and `ref.txt` files and aborts without changing anything if any of them is invalid. It then writes all of their contents into `data/testresults.db`, deletes the migrated files, and removes the test run folders that are left empty. The `audit.txt` and all images are not touched. Use `--dry-run` to only validate the files and see what would happen, and `--keep-files` to keep the original files. If the script is interrupted while deleting the files, running it again compares the remaining files with the database and finishes the cleanup. Afterwards, start the server. The first time the server starts after the migration, it computes the hashes of the pixels of all candidate and difference images, which takes a few minutes for a large data folder.
 
-If the `config.json` of an older version still contains the `data` setting, remove it; the server refuses to start while it is present.
+The `config.json` of older versions contains settings that are no longer supported, and the server refuses to start while one of them is present: remove `data` (the test results are always stored in the `data` folder next to the `config.json`), and move `port` and `adminToken` into the `.env` file as `PORT` and `ADMIN_TOKEN`.
 
 ### Removing a hardware
 All test runs of a hardware (for example a test machine that is no longer used) can be removed with:

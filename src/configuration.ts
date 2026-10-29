@@ -71,11 +71,23 @@ const ConfigurationSchema = z
     imageSize: SizeSchema,
     applications: z.array(ApplicationSchema).min(1).optional(),
     thumbnailScale: z.number().int().min(1),
-    adminToken: z.string().optional(),
     runners: z.array(z.string().min(1)),
     preferredHardware: z.array(z.string()).optional()
   })
   .strict();
+
+/**
+ * Settings that older versions read from the configuration file, together with the
+ * explanation of what replaced them. The server refuses to start while one of them is
+ * present, so that a value is never silently ignored.
+ */
+const RemovedSettings: Record<string, string> = {
+  port: 'The port is set with PORT in the .env file.',
+  data:
+    'The test results are always stored in the "data" folder next to the ' +
+    'configuration file.',
+  adminToken: 'The admin token is set with ADMIN_TOKEN in the .env file.'
+};
 
 /**
  * Treats empty environment variables (for example `ADMIN_TOKEN=`) as if they were unset.
@@ -129,12 +141,15 @@ class Configuration {
     }
 
     const data: unknown = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
-    if (typeof data === 'object' && data != null && 'data' in data) {
-      throw new Error(
-        `The "data" setting in ${configFile} is no longer supported. The test results ` +
-          'are always stored in the "data" folder next to the configuration file. ' +
-          'Remove the setting to continue.'
-      );
+    if (typeof data === 'object' && data != null) {
+      for (const [setting, replacement] of Object.entries(RemovedSettings)) {
+        if (setting in data) {
+          throw new Error(
+            `The "${setting}" setting in ${configFile} is no longer supported. ` +
+              `${replacement} Remove the setting to continue.`
+          );
+        }
+      }
     }
 
     const res = ConfigurationSchema.safeParse(data);
@@ -174,7 +189,7 @@ class Configuration {
       }));
     }
     this.thumbnailScale = env.THUMBNAIL_SCALE ?? config.thumbnailScale;
-    this.adminToken = env.ADMIN_TOKEN ?? config.adminToken ?? '';
+    this.adminToken = env.ADMIN_TOKEN ?? '';
     this.runners = config.runners;
     this.preferredHardware = config.preferredHardware ?? [];
     this.corsOrigins = env.CORS_ORIGINS
@@ -191,8 +206,8 @@ class Configuration {
 
     if (this.adminToken.trim() === '') {
       throw new Error(
-        'No admin token is configured. Set ADMIN_TOKEN in the .env file (or adminToken ' +
-          `in ${configFile}) to a long, random value`
+        'No admin token is configured. Set ADMIN_TOKEN in the .env file to a long, ' +
+          'random value'
       );
     }
   }
@@ -247,7 +262,7 @@ class Configuration {
   thumbnailScale: number;
 
   /// A token that has to be sent in the `Authorization` header to be able to perform
-  /// administrative tasks
+  /// administrative tasks. It is only read from the ADMIN_TOKEN environment variable
   adminToken: string;
 
   /// The list of ids for runners that are allowed to submit tests
