@@ -15,7 +15,13 @@ import { useDisclosure } from '@mantine/hooks';
 
 import { fetchJson, historyUrl, resultUrl } from '../api';
 import { TestData, TestRecord } from '../types';
-import { commitUrl, githubIssueUrl, timingDisplay } from '../utils';
+import {
+  commitUrl,
+  githubIssueUrl,
+  imageCount,
+  imageError,
+  timingDisplay
+} from '../utils';
 
 import { ImageThumbnail } from './ImageThumbnail';
 import { PixelDiffNumber } from './PixelDiffNumber';
@@ -80,6 +86,7 @@ export function TestHistory({
   // The newest test run comes first
   const testData = history ? [...history].reverse() : [];
   const latest = record.data[record.data.length - 1];
+  const nLatestImages = latest ? imageCount(latest) : 1;
 
   const ImageWidth = 250;
 
@@ -115,41 +122,51 @@ export function TestHistory({
       >
         <Stack align={'center'}>
           <Text px={'md'}>
-            Are you sure you want to update the reference image to the candidate for the
-            test: {record.name}?{' '}
+            Are you sure you want to update the{' '}
+            {nLatestImages > 1
+              ? `${nLatestImages} reference images to their candidates`
+              : 'reference image to the candidate'}{' '}
+            for the test: {record.name}?{' '}
             <Text span fw={'bold'}>
               This action cannot be undone.
             </Text>
           </Text>
 
-          <Group align={'center'} my={'sm'} wrap={'nowrap'}>
-            <Stack align={'center'} gap={'xs'}>
-              <Text>Candidate</Text>
-              <ImageThumbnail
-                type={'candidate'}
-                test={record}
-                timestamp={latest?.timeStamp}
-                revision={revision}
-                width={ImageWidth}
-              />
+          {Array.from({ length: nLatestImages }, (_, i) => i + 1).map((image) => (
+            <Stack key={image} align={'center'} gap={'xs'}>
+              {nLatestImages > 1 && <Text fw={'bold'}>Image {image}</Text>}
+              <Group align={'center'} my={'sm'} wrap={'nowrap'}>
+                <Stack align={'center'} gap={'xs'}>
+                  <Text>Candidate</Text>
+                  <ImageThumbnail
+                    type={'candidate'}
+                    test={record}
+                    timestamp={latest?.timeStamp}
+                    revision={revision}
+                    width={ImageWidth}
+                    image={image}
+                  />
+                </Stack>
+                <Text>→</Text>
+                <Stack align={'center'} gap={'xs'}>
+                  <Text>Reference</Text>
+                  <ImageThumbnail
+                    type={'reference'}
+                    test={record}
+                    timestamp={latest?.timeStamp}
+                    revision={revision}
+                    width={ImageWidth}
+                    image={image}
+                  />
+                </Stack>
+              </Group>
+              {latest && (
+                <Text>
+                  Error: <PixelDiffNumber value={imageError(latest, image)} />
+                </Text>
+              )}
             </Stack>
-            <Text>→</Text>
-            <Stack align={'center'} gap={'xs'}>
-              <Text>Reference</Text>
-              <ImageThumbnail
-                type={'reference'}
-                test={record}
-                timestamp={latest?.timeStamp}
-                revision={revision}
-                width={ImageWidth}
-              />
-            </Stack>
-          </Group>
-          {latest && (
-            <Text>
-              Error: <PixelDiffNumber value={latest.pixelError} />
-            </Text>
-          )}
+          ))}
 
           <Group>
             <Button onClick={updateReference} color={'red'}>
@@ -220,45 +237,59 @@ export function TestHistory({
               {testData.slice(0, visibleCount).map((d: TestData, i: number) => {
                 const commit = commitUrl(repository, d.commitHash);
                 const issue = i === 0 ? githubIssueUrl(record, d, repository) : null;
-                return (
-                  <Table.Tr key={d.timeStamp}>
+                const nImages = imageCount(d);
+                // Each image has its own row, and the values of the whole test run span
+                // the rows of all of its images
+                return Array.from({ length: nImages }, (_, k) => k + 1).map((image) => (
+                  <Table.Tr key={`${d.timeStamp}-${image}`}>
+                    {image === 1 && (
+                      <Table.Td rowSpan={nImages}>
+                        <Text size={'sm'} c={'dimmed'}>
+                          {new Date(d.timeStamp).toISOString().split('T')[0]}
+                          <br />
+                          {new Date(d.timeStamp)
+                            .toISOString()
+                            .split('T')[1]
+                            ?.replace('Z', '')}
+                        </Text>
+                      </Table.Td>
+                    )}
                     <Table.Td>
-                      <Text size={'sm'} c={'dimmed'}>
-                        {new Date(d.timeStamp).toISOString().split('T')[0]}
-                        <br />
-                        {new Date(d.timeStamp)
-                          .toISOString()
-                          .split('T')[1]
-                          ?.replace('Z', '')}
-                      </Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <PixelDiffNumber value={d.pixelError} />
-                    </Table.Td>
-                    <Table.Td>
-                      {commit ? (
-                        <Anchor
-                          href={commit}
-                          target={'_blank'}
-                          rel={'noopener noreferrer'}
-                        >
-                          {d.commitHash.substring(0, 8)}
-                        </Anchor>
-                      ) : (
-                        <Text>{d.commitHash.substring(0, 8)}</Text>
+                      {nImages > 1 && (
+                        <Text size={'xs'} c={'dimmed'}>
+                          Image {image}
+                        </Text>
                       )}
+                      <PixelDiffNumber value={imageError(d, image)} />
                     </Table.Td>
-                    <Table.Td>
-                      <Text>{timingDisplay(d.timing)}</Text>
-                    </Table.Td>
-                    <Table.Td>
-                      <Anchor
-                        href={resultUrl('log', record, d.timeStamp)}
-                        target={'_blank'}
-                      >
-                        Log ({d.nErrors} errors)
-                      </Anchor>
-                    </Table.Td>
+                    {image === 1 && (
+                      <>
+                        <Table.Td rowSpan={nImages}>
+                          {commit ? (
+                            <Anchor
+                              href={commit}
+                              target={'_blank'}
+                              rel={'noopener noreferrer'}
+                            >
+                              {d.commitHash.substring(0, 8)}
+                            </Anchor>
+                          ) : (
+                            <Text>{d.commitHash.substring(0, 8)}</Text>
+                          )}
+                        </Table.Td>
+                        <Table.Td rowSpan={nImages}>
+                          <Text>{timingDisplay(d.timing)}</Text>
+                        </Table.Td>
+                        <Table.Td rowSpan={nImages}>
+                          <Anchor
+                            href={resultUrl('log', record, d.timeStamp)}
+                            target={'_blank'}
+                          >
+                            Log ({d.nErrors} errors)
+                          </Anchor>
+                        </Table.Td>
+                      </>
+                    )}
                     {['candidate', 'reference', 'difference'].map((type) => (
                       <Table.Td key={type}>
                         <ImageThumbnail
@@ -267,50 +298,20 @@ export function TestHistory({
                           timestamp={d.timeStamp}
                           revision={revision}
                           width={ImageWidth}
+                          image={image}
                         />
                       </Table.Td>
                     ))}
-                    <Table.Td>
-                      {i === 0 && (
-                        <Stack gap={'xs'}>
-                          <Tooltip
-                            label={'Enter the admin token in the header first'}
-                            disabled={canUpdateReference}
-                            withArrow
-                          >
-                            {/* `data-disabled` instead of `disabled` keeps the tooltip working */}
-                            <Button
-                              variant={'default'}
-                              onClick={(e: React.MouseEvent) => {
-                                if (!canUpdateReference) {
-                                  e.preventDefault();
-                                  return;
-                                }
-                                open();
-                              }}
-                              loading={updating}
-                              data-disabled={canUpdateReference ? undefined : true}
-                            >
-                              Upgrade Candidate to Reference
-                            </Button>
-                          </Tooltip>
-                          {issue && (
-                            <Button
-                              component={'a'}
-                              href={issue}
-                              target={'_blank'}
-                              rel={'noopener noreferrer'}
-                              variant={'default'}
-                            >
-                              Create GitHub Issue
-                            </Button>
-                          )}
-                          {canRerun && (
+                    {image === 1 && (
+                      <Table.Td rowSpan={nImages}>
+                        {i === 0 && (
+                          <Stack gap={'xs'}>
                             <Tooltip
                               label={'Enter the admin token in the header first'}
                               disabled={canUpdateReference}
                               withArrow
                             >
+                              {/* `data-disabled` instead of `disabled` keeps the tooltip working */}
                               <Button
                                 variant={'default'}
                                 onClick={(e: React.MouseEvent) => {
@@ -318,20 +319,53 @@ export function TestHistory({
                                     e.preventDefault();
                                     return;
                                   }
-                                  rerunDialog.open();
+                                  open();
                                 }}
-                                loading={rerunning}
+                                loading={updating}
                                 data-disabled={canUpdateReference ? undefined : true}
                               >
-                                Rerun Test
+                                Upgrade Candidate to Reference
                               </Button>
                             </Tooltip>
-                          )}
-                        </Stack>
-                      )}
-                    </Table.Td>
+                            {issue && (
+                              <Button
+                                component={'a'}
+                                href={issue}
+                                target={'_blank'}
+                                rel={'noopener noreferrer'}
+                                variant={'default'}
+                              >
+                                Create GitHub Issue
+                              </Button>
+                            )}
+                            {canRerun && (
+                              <Tooltip
+                                label={'Enter the admin token in the header first'}
+                                disabled={canUpdateReference}
+                                withArrow
+                              >
+                                <Button
+                                  variant={'default'}
+                                  onClick={(e: React.MouseEvent) => {
+                                    if (!canUpdateReference) {
+                                      e.preventDefault();
+                                      return;
+                                    }
+                                    rerunDialog.open();
+                                  }}
+                                  loading={rerunning}
+                                  data-disabled={canUpdateReference ? undefined : true}
+                                >
+                                  Rerun Test
+                                </Button>
+                              </Tooltip>
+                            )}
+                          </Stack>
+                        )}
+                      </Table.Td>
+                    )}
                   </Table.Tr>
-                );
+                ));
               })}
             </Table.Tbody>
           </Table>

@@ -435,6 +435,277 @@ describe('comparing hardware', () => {
   });
 });
 
+describe('multiple images', () => {
+  const Group = 'multi';
+  const Url = 'openspace/multi/test/hw1';
+
+  function submitImages(
+    timestamp: string,
+    images: Record<string, Buffer>,
+    fields: Record<string, string> = {}
+  ) {
+    let req = request(app).post('/api/submit-test');
+    const values = {
+      runnerID: Runner,
+      hardware: 'hw1',
+      group: Group,
+      name: 'test',
+      timestamp: timestamp,
+      timing: '1',
+      commitHash: 'abcdef1',
+      ...fields
+    };
+    for (const [key, value] of Object.entries(values)) {
+      req = req.field(key, value);
+    }
+    for (const [field, image] of Object.entries(images)) {
+      req = req.attach(field, image, `${field}.png`);
+    }
+    return req.attach('log', Buffer.from('error'), 'log.txt');
+  }
+
+  async function runs(url = Url) {
+    const [application, group, name, hardware] = url.split('/');
+    const res = await request(app).get(
+      `/api/test-history/${application}/${group}/${name}/${hardware}`
+    );
+    expect(res.status).toBe(200);
+    return res.body as {
+      pixelError: number;
+      candidateImage: string;
+      differenceImage: string;
+      images?: { pixelError: number }[];
+    }[];
+  }
+
+  const testFolder = path.join(DataFolder, 'tests/openspace/hw1/multi/test');
+  const referenceFolder = path.join(DataFolder, 'reference/openspace/hw1/multi/test');
+
+  it('rejects gaps and wrong sizes without leaving files behind', async () => {
+    const gap = await submitImages('2026-03-01T00:00:00Z', {
+      file: makePng([0, 0, 255]),
+      file3: makePng([0, 0, 255])
+    });
+    expect(gap.status).toBe(400);
+    expect(gap.body.error).toMatch(/file2/);
+
+    const missingFirst = await submitImages('2026-03-01T00:00:00Z', {
+      file2: makePng([0, 0, 255])
+    });
+    expect(missingFirst.status).toBe(400);
+
+    const wrongSize = await submitImages('2026-03-01T00:00:00Z', {
+      file: makePng([0, 0, 255]),
+      file2: makePng([0, 0, 255], 0, Width * 2)
+    });
+    expect(wrongSize.status).toBe(400);
+    expect(wrongSize.body.error).toMatch(/wrong size/);
+
+    expect(fs.existsSync(testFolder)).toBe(false);
+    expect(fs.existsSync(referenceFolder)).toBe(false);
+  });
+
+  it('stores and returns all images of a test run', async () => {
+    const res = await submitImages('2026-03-01T00:00:00Z', {
+      file: makePng([0, 0, 255]),
+      file2: makePng([255, 0, 0])
+    });
+    expect(res.status).toBe(200);
+
+    expect(fs.existsSync(path.join(referenceFolder, '20260301T000000000Z.png'))).toBe(
+      true
+    );
+    expect(fs.existsSync(path.join(referenceFolder, '20260301T000000000Z-2.png'))).toBe(
+      true
+    );
+    const folder = path.join(testFolder, '20260301T000000000Z');
+    for (const file of [
+      'candidate.png',
+      'candidate-thumbnail.png',
+      'candidate-2.png',
+      'candidate-2-thumbnail.png',
+      'difference.png',
+      'difference-2.png'
+    ]) {
+      expect(fs.existsSync(path.join(folder, file))).toBe(true);
+    }
+
+    for (const type of [
+      'candidate',
+      'reference',
+      'difference',
+      'candidate-1',
+      'candidate-2',
+      'reference-2',
+      'difference-2',
+      'candidate-2-thumbnail',
+      'reference-2-thumbnail',
+      'difference-2-thumbnail'
+    ]) {
+      expect((await request(app).get(`/api/result/${type}/${Url}`)).status).toBe(200);
+    }
+    // The legacy URLs support the number of the image as well
+    expect(
+      (await request(app).get('/api/result/candidate-2/multi/test/hw1')).status
+    ).toBe(200);
+    expect((await request(app).get(`/api/result/candidate-3/${Url}`)).status).toBe(404);
+    expect((await request(app).get(`/api/result/log-2/${Url}`)).status).toBe(400);
+    expect((await request(app).get(`/api/result/log/${Url}`)).text).toBe('error');
+  });
+
+  it('reports the largest error and the error of each image', async () => {
+    const res = await submitImages('2026-03-02T00:00:00Z', {
+      file: makePng([0, 0, 255]),
+      file2: makePng([255, 0, 0], 64)
+    });
+    expect(res.status).toBe(200);
+
+    const latest = (await runs()).at(-1)!;
+    expect(latest.pixelError).toBeCloseTo(64 / (Width * Height));
+    expect(latest.images).toHaveLength(2);
+    expect(latest.images![0]!.pixelError).toBe(0);
+    expect(latest.images![1]!.pixelError).toBeCloseTo(64 / (Width * Height));
+  });
+
+  it('reuses identical images only per position', async () => {
+    const res = await submitImages('2026-03-03T00:00:00Z', {
+      file: makePng([0, 0, 255]),
+      file2: makePng([255, 0, 0], 64)
+    });
+    expect(res.status).toBe(200);
+    // All images were reused, so the test run does not have a folder
+    expect(fs.existsSync(path.join(testFolder, '20260303T000000000Z'))).toBe(false);
+
+    // This candidate looks like an earlier first image, but has to be stored as the second
+    const swapped = await submitImages(
+      '2026-03-04T00:00:00Z',
+      { file: makePng([0, 0, 255]), file2: makePng([0, 0, 255]) },
+      {}
+    );
+    expect(swapped.status).toBe(200);
+    expect(
+      fs.existsSync(path.join(testFolder, '20260304T000000000Z', 'candidate-2.png'))
+    ).toBe(true);
+  });
+
+  it('compares each image in the run-test and compare calls', async () => {
+    const image2 = await request(app)
+      .post('/api/run-test')
+      .field('runnerID', Runner)
+      .field('hardware', 'hw1')
+      .field('group', Group)
+      .field('name', 'test')
+      .field('image', '2')
+      .attach('file', makePng([255, 0, 0]), 'candidate.png');
+    expect(image2.status).toBe(200);
+    expect(Number(image2.headers['result'])).toBe(0);
+
+    const missing = await request(app)
+      .post('/api/run-test')
+      .field('runnerID', Runner)
+      .field('hardware', 'hw1')
+      .field('group', Group)
+      .field('name', 'test')
+      .field('image', '3')
+      .attach('file', makePng([255, 0, 0]), 'candidate.png');
+    expect(missing.status).toBe(404);
+
+    const other = await submitImages(
+      '2026-03-05T00:00:00Z',
+      { file: makePng([0, 0, 255]), file2: makePng([255, 0, 0], 32) },
+      { hardware: 'hw2' }
+    );
+    expect(other.status).toBe(200);
+    const reference2 = await request(app).get(
+      `/api/compare/reference-2/openspace/${Group}/test/hw1/hw2`
+    );
+    expect(reference2.status).toBe(200);
+    expect(Number(reference2.headers['result'])).toBeCloseTo(32 / (Width * Height));
+    const reference3 = await request(app).get(
+      `/api/compare/reference-3/openspace/${Group}/test/hw1/hw2`
+    );
+    expect(reference3.status).toBe(404);
+    const candidate3 = await request(app).get(
+      `/api/compare/candidate-3/openspace/${Group}/test/hw1/hw2`
+    );
+    expect(candidate3.status).toBe(404);
+  });
+
+  it('upgrades all images to references', async () => {
+    const res = await request(app)
+      .post('/api/update-reference')
+      .set('Authorization', `Bearer ${AdminToken}`)
+      .send({ group: Group, name: 'test', hardware: 'hw1' });
+    expect(res.status).toBe(200);
+
+    expect(fs.existsSync(path.join(referenceFolder, '20260304T000000000Z.png'))).toBe(
+      true
+    );
+    expect(fs.existsSync(path.join(referenceFolder, '20260304T000000000Z-2.png'))).toBe(
+      true
+    );
+    const latest = (await runs()).at(-1)!;
+    expect(latest.pixelError).toBe(0);
+    expect(latest.images!.map((image) => image.pixelError)).toEqual([0, 0]);
+  });
+
+  it('creates the reference of an image that is added to a test', async () => {
+    const options = { hardware: 'hw1', name: 'grows' };
+    const one = await submitImages(
+      '2026-03-06T00:00:00Z',
+      { file: makePng([0, 0, 255]) },
+      options
+    );
+    expect(one.status).toBe(200);
+
+    const two = await submitImages(
+      '2026-03-07T00:00:00Z',
+      { file: makePng([0, 0, 255]), file2: makePng([255, 0, 0]) },
+      options
+    );
+    expect(two.status).toBe(200);
+    const folder = path.join(DataFolder, 'reference/openspace/hw1/multi/grows');
+    expect(fs.existsSync(path.join(folder, '20260306T000000000Z-2.png'))).toBe(true);
+
+    const three = await submitImages(
+      '2026-03-08T00:00:00Z',
+      { file: makePng([0, 0, 255]), file2: makePng([255, 0, 0], 64) },
+      options
+    );
+    expect(three.status).toBe(200);
+    const all = await runs('openspace/multi/grows/hw1');
+    expect(all[0]!.images).toBeUndefined();
+    expect(all[1]!.pixelError).toBe(0);
+    expect(all[2]!.images![1]!.pixelError).toBeCloseTo(64 / (Width * Height));
+
+    // The first test run does not have a second image
+    expect(
+      (
+        await request(app).get(
+          '/api/result/candidate-2/openspace/multi/grows/hw1/2026-03-06T00:00:00Z'
+        )
+      ).status
+    ).toBe(404);
+  });
+
+  it('does not add values for multiple images to test runs with one image', async () => {
+    const records = await request(app).get('/api/test-records');
+    const single = (records.body as { group: string; data: object[] }[]).find(
+      (record) => record.group == 'group'
+    )!;
+    expect(Object.keys(single.data[0]!).sort()).toEqual([
+      'candidateImage',
+      'commitHash',
+      'differenceImage',
+      'nErrors',
+      'pixelError',
+      'referenceImage',
+      'timeStamp',
+      'timing'
+    ]);
+  });
+});
+
 describe('other endpoints', () => {
   it('reports the health of the server', async () => {
     const res = await request(app).get('/api/health');
@@ -502,6 +773,17 @@ describe('other endpoints', () => {
     // the same, and every test run still has its difference image
     const after = await history();
     expect(after.map((r) => r.pixelError)).toEqual(before.map((r) => r.pixelError));
+
+    // The results of all images of a test run are regenerated
+    const multiple = await request(app).get(
+      '/api/result/difference-2/openspace/multi/grows/hw1'
+    );
+    expect(multiple.status).toBe(200);
+    const records = (
+      await request(app).get('/api/test-history/openspace/multi/grows/hw1')
+    ).body as { images?: { pixelError: number }[] }[];
+    expect(records.at(-1)!.images![1]!.pixelError).toBeCloseTo(64 / (Width * Height));
+
     for (const run of after) {
       const image = await request(app).get(
         `/api/result/difference/openspace/group/test/hw1/${run.timeStamp}`

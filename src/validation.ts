@@ -38,6 +38,11 @@ export const DefaultApplication = 'openspace';
 export const MaxImageDimension = 16384;
 
 /**
+ * The largest number of images that a single test run may have.
+ */
+export const MaxImagesPerTest = 8;
+
+/**
  * The amount of time a submitted timestamp may lie in the future, to allow for clocks
  * that are slightly off.
  */
@@ -139,7 +144,8 @@ export const SubmitTestSchema = z.object({
  */
 export const RunTestSchema = z.object({
   ...TestKeyShape,
-  runnerID: z.string().min(1)
+  runnerID: z.string().min(1),
+  image: z.coerce.number().int().min(1).max(MaxImagesPerTest).default(1)
 });
 
 /**
@@ -167,19 +173,60 @@ export const ThresholdSchema = z.object({
 });
 
 /**
+ * The kinds of images that are stored for each image of a test
+ */
+export type ImageKind = 'reference' | 'candidate' | 'difference';
+
+/**
+ * The result that is requested through the `/api/result` calls. Each test run has a single
+ * log, but one set of images for each of its images.
+ */
+export type ResultType =
+  { kind: 'log' } | { kind: ImageKind; image: number; thumbnail: boolean };
+
+/**
+ * Parses the type of a result. The number of the image is optional and defaults to the
+ * first image, for example "candidate", "candidate-2", or "candidate-2-thumbnail".
+ *
+ * @param value The type that should be parsed
+ * @returns The parsed type or `null` if the value is not a valid type
+ */
+export function parseResultType(value: string): ResultType | null {
+  if (value == 'log') {
+    return { kind: 'log' };
+  }
+
+  const match = /^(reference|candidate|difference)(?:-([1-9]\d*))?(-thumbnail)?$/.exec(
+    value
+  );
+  if (match == null) {
+    return null;
+  }
+  return {
+    kind: match[1] as ImageKind,
+    image: Number(match[2] ?? 1),
+    thumbnail: match[3] != null
+  };
+}
+
+/**
  * The URL parameters of the `/api/result` calls.
  */
 export const ResultParamsSchema = z.object({
   ...TestKeyShape,
-  type: z.enum([
-    'reference',
-    'candidate',
-    'difference',
-    'reference-thumbnail',
-    'candidate-thumbnail',
-    'difference-thumbnail',
-    'log'
-  ]),
+  type: z.string().transform((value, ctx) => {
+    const type = parseResultType(value);
+    if (type == null) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'must be "log" or one of "reference", "candidate", or "difference", optionally ' +
+          'followed by the number of the image and "-thumbnail"'
+      });
+      return z.NEVER;
+    }
+    return type;
+  }),
   timestamp: TimestampSchema.optional()
 });
 
@@ -192,7 +239,18 @@ export const CompareParamsSchema = z.object({
   name: NameSchema,
   hardware1: NameSchema,
   hardware2: NameSchema,
-  type: z.enum(['reference', 'candidate'])
+  type: z.string().transform((value, ctx) => {
+    const match = /^(reference|candidate)(?:-([1-9]\d*))?$/.exec(value);
+    if (match == null) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'must be "reference" or "candidate", optionally followed by the number of the image'
+      });
+      return z.NEVER;
+    }
+    return { kind: match[1] as 'reference' | 'candidate', image: Number(match[2] ?? 1) };
+  })
 });
 
 /**

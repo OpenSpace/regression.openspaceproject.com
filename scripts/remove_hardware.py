@@ -118,6 +118,11 @@ def main() -> None:
 
         print("Removing test runs from the database...")
         with connection:
+            connection.execute(
+                "DELETE FROM test_run_images WHERE run_id IN "
+                "(SELECT id FROM test_runs WHERE hardware = ?)",
+                (hardware,),
+            )
             removed = connection.execute(
                 "DELETE FROM test_runs WHERE hardware = ?", (hardware,)
             ).rowcount

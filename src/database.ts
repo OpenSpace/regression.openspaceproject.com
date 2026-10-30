@@ -27,44 +27,57 @@ import fs from 'fs';
 
 import { printAudit } from './audit';
 import { DataFolder } from './paths';
-import type { TestData, TestRecord } from './testrecords';
+import type { TestData, TestImage, TestRecord } from './testrecords';
 
 /**
  * The version of the database schema. It is stored in the `user_version` of the database
  * and has to be increased whenever the schema changes.
  */
-const SchemaVersion = 1;
+const SchemaVersion = 2;
 
 /**
- * The database schema. The `timestamp`, `candidate_image`, and `difference_image` columns
- * are stored as milliseconds since the Unix epoch. The `candidate_image` and
- * `difference_image` columns contain the timestamp of the test run in whose folder the
- * respective image is stored. The `candidate_hash` and `difference_hash` columns contain
- * the `pixelHash` of the respective image and are used to find identical images. They are
- * `NULL` for test runs that were migrated from the file-based storage until the server has
- * computed them at startup. Keep this in sync with the schema in
- * scripts/1-migrate_to_sqlite.py
+ * The database schema. The `test_runs` table contains the values that apply to a whole
+ * test run and the `test_run_images` table contains one row for each image of a test run,
+ * which are numbered starting at 1. The `timestamp`, `candidate_image`, and
+ * `difference_image` columns are stored as milliseconds since the Unix epoch. The
+ * `candidate_image` and `difference_image` columns contain the timestamp of the test run
+ * in whose folder the respective image is stored. The `candidate_hash` and
+ * `difference_hash` columns contain the `pixelHash` of the respective image and are used to
+ * find identical images. They are `NULL` for test runs that were migrated from the
+ * file-based storage until the server has computed them at startup. Databases of earlier
+ * versions are upgraded by scripts/2-migrate_to_multiple_images.py
  */
 const Schema = `
 CREATE TABLE IF NOT EXISTS test_runs (
-  id               INTEGER PRIMARY KEY,
-  application      TEXT    NOT NULL,
-  hardware         TEXT    NOT NULL,
-  group_name       TEXT    NOT NULL,
-  name             TEXT    NOT NULL,
-  timestamp        INTEGER NOT NULL,
-  pixel_error      REAL    NOT NULL,
-  timing           REAL    NOT NULL,
-  n_errors         INTEGER NOT NULL,
-  commit_hash      TEXT    NOT NULL,
-  reference_image  TEXT    NOT NULL,
-  candidate_image  INTEGER NOT NULL,
-  difference_image INTEGER NOT NULL,
-  log              TEXT    NOT NULL,
-  candidate_hash   TEXT,
-  difference_hash  TEXT,
+  id              INTEGER PRIMARY KEY,
+  application     TEXT    NOT NULL,
+  hardware        TEXT    NOT NULL,
+  group_name      TEXT    NOT NULL,
+  name            TEXT    NOT NULL,
+  timestamp       INTEGER NOT NULL,
+  timing          REAL    NOT NULL,
+  n_errors        INTEGER NOT NULL,
+  commit_hash     TEXT    NOT NULL,
+  reference_image TEXT    NOT NULL,
+  log             TEXT    NOT NULL,
   UNIQUE (application, hardware, group_name, name, timestamp)
 );
+
+CREATE TABLE IF NOT EXISTS test_run_images (
+  run_id           INTEGER NOT NULL REFERENCES test_runs (id) ON DELETE CASCADE,
+  image            INTEGER NOT NULL,
+  pixel_error      REAL    NOT NULL,
+  candidate_image  INTEGER NOT NULL,
+  difference_image INTEGER NOT NULL,
+  candidate_hash   TEXT,
+  difference_hash  TEXT,
+  PRIMARY KEY (run_id, image)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS test_run_images_candidate_hash
+  ON test_run_images (candidate_hash);
+CREATE INDEX IF NOT EXISTS test_run_images_difference_hash
+  ON test_run_images (difference_hash);
 
 CREATE TABLE IF NOT EXISTS reference_pointers (
   application     TEXT NOT NULL,
@@ -77,17 +90,6 @@ CREATE TABLE IF NOT EXISTS reference_pointers (
 `;
 
 /**
- * The indices that are used to find identical images. They are created separately from
- * the tables, as the hash columns might have to be added to an existing table first.
- */
-const Indices = `
-CREATE INDEX IF NOT EXISTS test_runs_candidate_hash
-  ON test_runs (application, hardware, group_name, name, candidate_hash);
-CREATE INDEX IF NOT EXISTS test_runs_difference_hash
-  ON test_runs (application, hardware, group_name, name, difference_hash);
-`;
-
-/**
  * The kinds of images whose hashes are stored in the database
  */
 export type HashedImage = 'candidate' | 'difference';
@@ -96,9 +98,19 @@ export type HashedImage = 'candidate' | 'difference';
  * The columns of the `test_runs` table that are needed to create a TestData object
  */
 const RunColumns = `
-  application, hardware, group_name, name, timestamp, pixel_error, timing, n_errors,
-  commit_hash, reference_image, candidate_image, difference_image
+  id, application, hardware, group_name, name, timestamp, timing, n_errors, commit_hash,
+  reference_image
 `;
+
+/**
+ * The columns of the `test_run_images` table that are needed to create a TestData object
+ */
+const ImageColumns = 'image, pixel_error, candidate_image, difference_image';
+
+/**
+ * Test runs together with their images, which results in one row per image
+ */
+const RunsWithImages = 'test_runs JOIN test_run_images ON run_id = id';
 
 /**
  * The SQL condition that identifies a single test, using named parameters
@@ -119,18 +131,28 @@ type TestKey = {
 };
 
 /**
- * A row of the `test_runs` table as it is returned by queries that select `RunColumns`
+ * A row of the `test_run_images` table as it is returned by queries that select
+ * `ImageColumns`
  */
-type TestRunRow = TestKey & {
-  timestamp: number;
+type ImageRow = {
+  image: number;
   pixel_error: number;
-  timing: number;
-  n_errors: number;
-  commit_hash: string;
-  reference_image: string;
   candidate_image: number;
   difference_image: number;
 };
+
+/**
+ * A row as it is returned by queries that select `RunColumns` and `ImageColumns`
+ */
+type TestRunRow = TestKey &
+  ImageRow & {
+    id: number;
+    timestamp: number;
+    timing: number;
+    n_errors: number;
+    commit_hash: string;
+    reference_image: string;
+  };
 
 /**
  * The named parameters for the hashes of the candidate and difference images
@@ -180,11 +202,31 @@ export type ReferencePointer = {
  */
 function prepareStatements(db: Database.Database) {
   return {
-    insertRun: db.prepare<TestRunRow & ImageHashes & { log: string }>(`
-      INSERT INTO test_runs (${RunColumns}, log, candidate_hash, difference_hash)
+    insertRun: db.prepare<
+      TestKey & {
+        timestamp: number;
+        timing: number;
+        n_errors: number;
+        commit_hash: string;
+        reference_image: string;
+        log: string;
+      }
+    >(`
+      INSERT INTO test_runs (
+        application, hardware, group_name, name, timestamp, timing, n_errors, commit_hash,
+        reference_image, log
+      )
       VALUES (
-        @application, @hardware, @group_name, @name, @timestamp, @pixel_error, @timing,
-        @n_errors, @commit_hash, @reference_image, @candidate_image, @difference_image, @log,
+        @application, @hardware, @group_name, @name, @timestamp, @timing, @n_errors,
+        @commit_hash, @reference_image, @log
+      )
+    `),
+    insertImage: db.prepare<ImageRow & ImageHashes & { run_id: number | bigint }>(`
+      INSERT INTO test_run_images (
+        run_id, ${ImageColumns}, candidate_hash, difference_hash
+      )
+      VALUES (
+        @run_id, @image, @pixel_error, @candidate_image, @difference_image,
         @candidate_hash, @difference_hash
       )
     `),
@@ -192,70 +234,96 @@ function prepareStatements(db: Database.Database) {
       SELECT 1 AS found FROM test_runs WHERE ${TestCondition} AND timestamp = @timestamp
     `),
     latestRun: db.prepare<TestKey & { before: number }, TestRunRow>(`
-      SELECT ${RunColumns} FROM test_runs
-      WHERE ${TestCondition} AND timestamp <= @before
-      ORDER BY timestamp DESC LIMIT 1
+      SELECT ${RunColumns}, ${ImageColumns} FROM ${RunsWithImages}
+      WHERE ${TestCondition} AND timestamp = (
+        SELECT MAX(timestamp) FROM test_runs
+        WHERE ${TestCondition} AND timestamp <= @before
+      )
+      ORDER BY image
     `),
     runLog: db.prepare<TestKey & { timestamp: number }, { log: string }>(`
       SELECT log FROM test_runs WHERE ${TestCondition} AND timestamp = @timestamp
     `),
-    updateRun: db.prepare<
-      Omit<TestRunRow, 'timing' | 'n_errors' | 'commit_hash'> & {
-        difference_hash: string;
-      }
+    updateRunReference: db.prepare<
+      TestKey & { timestamp: number; reference_image: string }
     >(`
-      UPDATE test_runs SET
-        pixel_error = @pixel_error, reference_image = @reference_image,
-        candidate_image = @candidate_image, difference_image = @difference_image,
-        difference_hash = @difference_hash
+      UPDATE test_runs SET reference_image = @reference_image
       WHERE ${TestCondition} AND timestamp = @timestamp
     `),
-    candidateByHash: db.prepare<TestKey & { hash: string }, { owner: number }>(`
-      SELECT candidate_image AS owner FROM test_runs
-      WHERE ${TestCondition} AND candidate_hash = @hash
+    updateRunImage: db.prepare<
+      TestKey & ImageRow & { timestamp: number; difference_hash: string }
+    >(`
+      UPDATE test_run_images SET
+        pixel_error = @pixel_error, candidate_image = @candidate_image,
+        difference_image = @difference_image, difference_hash = @difference_hash
+      WHERE image = @image AND run_id = (
+        SELECT id FROM test_runs WHERE ${TestCondition} AND timestamp = @timestamp
+      )
+    `),
+    candidateByHash: db.prepare<
+      TestKey & { image: number; hash: string },
+      { owner: number }
+    >(`
+      SELECT candidate_image AS owner FROM ${RunsWithImages}
+      WHERE ${TestCondition} AND image = @image AND candidate_hash = @hash
       ORDER BY candidate_image LIMIT 1
     `),
-    differenceByHash: db.prepare<TestKey & { hash: string }, { owner: number }>(`
-      SELECT difference_image AS owner FROM test_runs
-      WHERE ${TestCondition} AND difference_hash = @hash
+    differenceByHash: db.prepare<
+      TestKey & { image: number; hash: string },
+      { owner: number }
+    >(`
+      SELECT difference_image AS owner FROM ${RunsWithImages}
+      WHERE ${TestCondition} AND image = @image AND difference_hash = @hash
       ORDER BY difference_image LIMIT 1
     `),
-    candidatesWithoutHash: db.prepare<[], TestKey & { owner: number }>(`
-      SELECT DISTINCT application, hardware, group_name, name, candidate_image AS owner
-      FROM test_runs WHERE candidate_hash IS NULL
+    candidatesWithoutHash: db.prepare<[], TestKey & { image: number; owner: number }>(`
+      SELECT DISTINCT application, hardware, group_name, name, image,
+        candidate_image AS owner
+      FROM ${RunsWithImages} WHERE candidate_hash IS NULL
     `),
-    differencesWithoutHash: db.prepare<[], TestKey & { owner: number }>(`
-      SELECT DISTINCT application, hardware, group_name, name, difference_image AS owner
-      FROM test_runs WHERE difference_hash IS NULL
+    differencesWithoutHash: db.prepare<[], TestKey & { image: number; owner: number }>(`
+      SELECT DISTINCT application, hardware, group_name, name, image,
+        difference_image AS owner
+      FROM ${RunsWithImages} WHERE difference_hash IS NULL
     `),
-    setCandidateHash: db.prepare<TestKey & { owner: number; hash: string }>(`
-      UPDATE test_runs SET candidate_hash = @hash
-      WHERE ${TestCondition} AND candidate_image = @owner
+    setCandidateHash: db.prepare<
+      TestKey & { image: number; owner: number; hash: string }
+    >(`
+      UPDATE test_run_images SET candidate_hash = @hash
+      WHERE image = @image AND candidate_image = @owner AND run_id IN (
+        SELECT id FROM test_runs WHERE ${TestCondition}
+      )
     `),
-    setDifferenceHash: db.prepare<TestKey & { owner: number; hash: string }>(`
-      UPDATE test_runs SET difference_hash = @hash
-      WHERE ${TestCondition} AND difference_image = @owner
+    setDifferenceHash: db.prepare<
+      TestKey & { image: number; owner: number; hash: string }
+    >(`
+      UPDATE test_run_images SET difference_hash = @hash
+      WHERE image = @image AND difference_image = @owner AND run_id IN (
+        SELECT id FROM test_runs WHERE ${TestCondition}
+      )
     `),
     allTests: db.prepare<[], TestKey>(`
       SELECT DISTINCT application, hardware, group_name, name FROM test_runs
       ORDER BY application, hardware, group_name, name
     `),
     allRuns: db.prepare<[], TestRunRow>(`
-      SELECT ${RunColumns} FROM test_runs
-      ORDER BY application, hardware, group_name, name, timestamp
+      SELECT ${RunColumns}, ${ImageColumns} FROM ${RunsWithImages}
+      ORDER BY application, hardware, group_name, name, timestamp, image
     `),
     latestRuns: db.prepare<{ count: number }, TestRunRow>(`
-      SELECT ${RunColumns} FROM (
+      SELECT ${RunColumns}, ${ImageColumns} FROM (
         SELECT ${RunColumns}, ROW_NUMBER() OVER (
           PARTITION BY application, hardware, group_name, name ORDER BY timestamp DESC
         ) AS position
         FROM test_runs
       )
+      JOIN test_run_images ON run_id = id
       WHERE position <= @count
-      ORDER BY application, hardware, group_name, name, timestamp
+      ORDER BY application, hardware, group_name, name, timestamp, image
     `),
     history: db.prepare<TestKey, TestRunRow>(`
-      SELECT ${RunColumns} FROM test_runs WHERE ${TestCondition} ORDER BY timestamp
+      SELECT ${RunColumns}, ${ImageColumns} FROM ${RunsWithImages}
+      WHERE ${TestCondition} ORDER BY timestamp, image
     `),
     referencePointer: db.prepare<TestKey, { reference_image: string }>(`
       SELECT reference_image FROM reference_pointers WHERE ${TestCondition}
@@ -334,28 +402,27 @@ export function openDatabase() {
   }
 
   DB = new Database(path);
-  DB.pragma('journal_mode = WAL');
-  DB.exec(Schema);
 
+  // This has to be checked first, as the tables must not be created in an older database
   const version = DB.pragma('user_version', { simple: true });
-  if (version == 0) {
-    DB.pragma(`user_version = ${SchemaVersion}`);
-  } else if (version != SchemaVersion) {
+  if (version == 1) {
+    DB.close();
+    throw new Error(
+      `The database ${path} has to be upgraded. Stop the server and run ` +
+        'scripts/2-migrate_to_multiple_images.py to upgrade it.'
+    );
+  }
+  if (version != 0 && version != SchemaVersion) {
+    DB.close();
     throw new Error(`Unsupported database schema version ${version} in ${path}`);
   }
 
-  // Databases that were created before the image hashes were introduced do not have the
-  // hash columns yet
-  const columns = DB.prepare<[], { name: string }>(`PRAGMA table_info(test_runs)`)
-    .all()
-    .map((column) => column.name);
-  for (const column of ['candidate_hash', 'difference_hash']) {
-    if (!columns.includes(column)) {
-      printAudit(`Adding column ${column} to the database`);
-      DB.exec(`ALTER TABLE test_runs ADD COLUMN ${column} TEXT`);
-    }
+  DB.pragma('journal_mode = WAL');
+  DB.pragma('foreign_keys = ON');
+  DB.exec(Schema);
+  if (version == 0) {
+    DB.pragma(`user_version = ${SchemaVersion}`);
   }
-  DB.exec(Indices);
 
   Statements = prepareStatements(DB);
 }
@@ -407,42 +474,66 @@ function testKey(
 }
 
 /**
- * Converts a row of the `test_runs` table into a TestData object.
+ * Converts the rows of a single test run into a TestData object. There has to be one row
+ * for each image of the test run, sorted by the number of the image.
  */
-function toTestData(row: TestRunRow): TestData {
+function toTestData(rows: TestRunRow[]): TestData {
+  const row = rows[0]!;
   return {
-    pixelError: row.pixel_error,
     timeStamp: new Date(row.timestamp),
     timing: row.timing,
     nErrors: row.n_errors,
     commitHash: row.commit_hash,
     referenceImage: row.reference_image,
-    candidateImage: new Date(row.candidate_image),
-    differenceImage: new Date(row.difference_image)
+    images: rows.map((image) => ({
+      image: image.image,
+      pixelError: image.pixel_error,
+      candidateImage: new Date(image.candidate_image),
+      differenceImage: new Date(image.difference_image)
+    }))
   };
 }
 
 /**
- * Converts a row of the `test_runs` table into a TestRun object.
+ * Collects consecutive rows that belong to the same test run. The rows have to be sorted
+ * by the test run and the number of the image.
  */
-function toTestRun(row: TestRunRow): TestRun {
+function groupByRun(rows: TestRunRow[]): TestRunRow[][] {
+  const runs: TestRunRow[][] = [];
+  let current: TestRunRow[] | null = null;
+  for (const row of rows) {
+    if (current == null || current[0]!.id != row.id) {
+      current = [];
+      runs.push(current);
+    }
+    current.push(row);
+  }
+  return runs;
+}
+
+/**
+ * Converts the rows of a single test run into a TestRun object.
+ */
+function toTestRun(rows: TestRunRow[]): TestRun {
+  const row = rows[0]!;
   return {
     application: row.application,
     group: row.group_name,
     name: row.name,
     hardware: row.hardware,
-    data: toTestData(row)
+    data: toTestData(rows)
   };
 }
 
 /**
  * Collects consecutive rows that belong to the same test into a single TestRecord. The
- * rows have to be sorted by test and timestamp.
+ * rows have to be sorted by test, timestamp, and the number of the image.
  */
 function toTestRecords(rows: TestRunRow[]): TestRecord[] {
   const records: TestRecord[] = [];
   let current: TestRecord | null = null;
-  for (const row of rows) {
+  for (const run of groupByRun(rows)) {
+    const row = run[0]!;
     if (
       current == null ||
       current.application != row.application ||
@@ -459,14 +550,15 @@ function toTestRecords(rows: TestRunRow[]): TestRecord[] {
       };
       records.push(current);
     }
-    current.data.push(toTestData(row));
+    current.data.push(toTestData(run));
   }
   return records;
 }
 
 /**
  * Stores a new test run. A test run with the same timestamp must not exist for the test
- * yet; use `testRunExists` to check that beforehand.
+ * yet; use `testRunExists` to check that beforehand. This has to be called inside a
+ * transaction, see `inTransaction`.
  *
  * @param application The name of the application that generated the test run
  * @param group The name of the group to which the test run belongs
@@ -474,7 +566,8 @@ function toTestRecords(rows: TestRunRow[]): TestRecord[] {
  * @param hardware The hardware on which the test was run
  * @param data The results of the test run
  * @param log The contents of the log file of the test run
- * @param hashes The `pixelHash` values of the candidate and the difference image
+ * @param hashes The `pixelHash` values of the candidate and the difference image for each
+ *        of the images in `data`, in the same order
  */
 export function insertTestRun(
   application: string,
@@ -483,22 +576,28 @@ export function insertTestRun(
   hardware: string,
   data: TestData,
   log: string,
-  hashes: { candidate: string; difference: string }
+  hashes: { candidate: string; difference: string }[]
 ) {
-  Statements.insertRun.run({
+  const { lastInsertRowid: runId } = Statements.insertRun.run({
     ...testKey(application, group, name, hardware),
     timestamp: data.timeStamp.getTime(),
-    pixel_error: data.pixelError,
     timing: data.timing,
     n_errors: data.nErrors,
     commit_hash: data.commitHash,
     reference_image: data.referenceImage,
-    candidate_image: data.candidateImage.getTime(),
-    difference_image: data.differenceImage.getTime(),
-    log: log,
-    candidate_hash: hashes.candidate,
-    difference_hash: hashes.difference
+    log: log
   });
+  for (const [i, image] of data.images.entries()) {
+    Statements.insertImage.run({
+      run_id: runId,
+      image: image.image,
+      pixel_error: image.pixelError,
+      candidate_image: image.candidateImage.getTime(),
+      difference_image: image.differenceImage.getTime(),
+      candidate_hash: hashes[i]!.candidate,
+      difference_hash: hashes[i]!.difference
+    });
+  }
 }
 
 /**
@@ -545,11 +644,11 @@ export function latestTestRun(
   hardware: string,
   before?: Date
 ): TestData | null {
-  const row = Statements.latestRun.get({
+  const rows = Statements.latestRun.all({
     ...testKey(application, group, name, hardware),
     before: before ? before.getTime() : Number.MAX_SAFE_INTEGER
   });
-  return row ? toTestData(row) : null;
+  return rows.length > 0 ? toTestData(rows) : null;
 }
 
 /**
@@ -578,32 +677,58 @@ export function testRunLog(
 }
 
 /**
- * Updates the results of an existing test run, which is identified by the timestamp of
- * the provided `data`. The pixel error, the reference image, the candidate image, and the
- * difference image are updated; all other values of the test run stay unchanged.
+ * Changes the reference image of an existing test run.
  *
  * @param application The name of the application that generated the test
  * @param group The name of the group of the test
  * @param name The name of the test
  * @param hardware The hardware of the test
- * @param data The new results of the test run
- * @param differenceHash The `pixelHash` of the new difference image
+ * @param timestamp The timestamp of the test run
+ * @param referenceImage The file name of the new reference image
  */
-export function updateTestRun(
+export function updateRunReference(
   application: string,
   group: string,
   name: string,
   hardware: string,
-  data: TestData,
+  timestamp: Date,
+  referenceImage: string
+) {
+  Statements.updateRunReference.run({
+    ...testKey(application, group, name, hardware),
+    timestamp: timestamp.getTime(),
+    reference_image: referenceImage
+  });
+}
+
+/**
+ * Updates the results of one image of an existing test run. The pixel error, the candidate
+ * image, and the difference image are updated.
+ *
+ * @param application The name of the application that generated the test
+ * @param group The name of the group of the test
+ * @param name The name of the test
+ * @param hardware The hardware of the test
+ * @param timestamp The timestamp of the test run
+ * @param image The new results of the image, which is identified by its number
+ * @param differenceHash The `pixelHash` of the new difference image
+ */
+export function updateRunImage(
+  application: string,
+  group: string,
+  name: string,
+  hardware: string,
+  timestamp: Date,
+  image: TestImage,
   differenceHash: string
 ) {
-  Statements.updateRun.run({
+  Statements.updateRunImage.run({
     ...testKey(application, group, name, hardware),
-    timestamp: data.timeStamp.getTime(),
-    pixel_error: data.pixelError,
-    reference_image: data.referenceImage,
-    candidate_image: data.candidateImage.getTime(),
-    difference_image: data.differenceImage.getTime(),
+    timestamp: timestamp.getTime(),
+    image: image.image,
+    pixel_error: image.pixelError,
+    candidate_image: image.candidateImage.getTime(),
+    difference_image: image.differenceImage.getTime(),
     difference_hash: differenceHash
   });
 }
@@ -617,6 +742,7 @@ export function updateTestRun(
  * @param group The name of the group of the test
  * @param name The name of the test
  * @param hardware The hardware of the test
+ * @param image The 1-based number of the image, only images at this position are searched
  * @param hash The `pixelHash` of the image that is searched
  * @returns The timestamp of the test run in whose folder the image is stored or `null` if
  *          the test does not use an image with this hash
@@ -627,12 +753,14 @@ export function findImageByHash(
   group: string,
   name: string,
   hardware: string,
+  image: number,
   hash: string
 ): Date | null {
   const statement =
     kind == 'candidate' ? Statements.candidateByHash : Statements.differenceByHash;
   const row = statement.get({
     ...testKey(application, group, name, hardware),
+    image: image,
     hash: hash
   });
   return row ? new Date(row.owner) : null;
@@ -642,9 +770,12 @@ export function findImageByHash(
  * Returns all candidate or difference images for which no hash has been stored yet.
  *
  * @param kind Whether the candidate or the difference images are returned
- * @returns The test and the timestamp of the test run in whose folder each image is stored
+ * @returns The test, the number of the image, and the timestamp of the test run in whose
+ *          folder each image is stored
  */
-export function imagesWithoutHash(kind: HashedImage): (TestKeyParts & { owner: Date })[] {
+export function imagesWithoutHash(
+  kind: HashedImage
+): (TestKeyParts & { image: number; owner: Date })[] {
   const statement =
     kind == 'candidate'
       ? Statements.candidatesWithoutHash
@@ -654,6 +785,7 @@ export function imagesWithoutHash(kind: HashedImage): (TestKeyParts & { owner: D
     group: row.group_name,
     name: row.name,
     hardware: row.hardware,
+    image: row.image,
     owner: new Date(row.owner)
   }));
 }
@@ -666,6 +798,7 @@ export function imagesWithoutHash(kind: HashedImage): (TestKeyParts & { owner: D
  * @param group The name of the group of the test
  * @param name The name of the test
  * @param hardware The hardware of the test
+ * @param image The 1-based number of the image
  * @param owner The timestamp of the test run in whose folder the image is stored
  * @param hash The `pixelHash` of the image
  */
@@ -675,6 +808,7 @@ export function setImageHash(
   group: string,
   name: string,
   hardware: string,
+  image: number,
   owner: Date,
   hash: string
 ) {
@@ -682,6 +816,7 @@ export function setImageHash(
     kind == 'candidate' ? Statements.setCandidateHash : Statements.setDifferenceHash;
   statement.run({
     ...testKey(application, group, name, hardware),
+    image: image,
     owner: owner.getTime(),
     hash: hash
   });
@@ -707,7 +842,7 @@ export function allTests(): TestKeyParts[] {
  * @returns All test runs that are stored in the database
  */
 export function allTestRuns(): TestRun[] {
-  return Statements.allRuns.all().map(toTestRun);
+  return groupByRun(Statements.allRuns.all()).map(toTestRun);
 }
 
 /**
@@ -736,9 +871,8 @@ export function testHistory(
   name: string,
   hardware: string
 ): TestData[] {
-  return Statements.history
-    .all(testKey(application, group, name, hardware))
-    .map(toTestData);
+  const rows = Statements.history.all(testKey(application, group, name, hardware));
+  return groupByRun(rows).map(toTestData);
 }
 
 /**

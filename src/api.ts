@@ -45,7 +45,8 @@ import {
   testHistory,
   testRunExists,
   testRunLog,
-  updateTestRun
+  updateRunImage,
+  updateRunReference
 } from './database';
 import {
   ConflictError,
@@ -58,6 +59,7 @@ import {
   candidateImage,
   differenceImage,
   hasReferenceImage,
+  imageFile,
   newReferenceImagePath,
   referenceImage,
   removeFolderIfEmpty,
@@ -76,13 +78,14 @@ import {
 import { triggerRerun } from './jenkins';
 import { testLockKey, TestLocks } from './lock';
 import { ProjectRoot } from './paths';
-import { isRegenerating, startRegeneration, TestData } from './testrecords';
+import { isRegenerating, startRegeneration, TestData, TestImage } from './testrecords';
 import {
   CompareParamsSchema,
   DefaultApplication,
   HistoryParamsSchema,
   MaxFutureOffset,
   MaxImageDimension,
+  MaxImagesPerTest,
   parse,
   RerunTestSchema,
   ResultParamsSchema,
@@ -111,6 +114,14 @@ const MaxUploadBytes = 1280 * 1024 * 1024;
 const MaxLogBytes = 64 * 1024 * 1024;
 
 /**
+ * The names of the fields in which the images of a test run are submitted. The first image
+ * is sent in the `file` field, all others have their number appended (`file2`, `file3`, ...)
+ */
+const ImageFields = Array.from({ length: MaxImagesPerTest }, (_, i) =>
+  i == 0 ? 'file' : `file${i + 1}`
+);
+
+/**
  * The multipart parser for the API calls that receive images. Files are kept in memory, as
  * they have to be decoded anyway. If the `runnerID` is sent before the files, which is the
  * case for the usual HTTP clients, requests with an invalid runner ID are rejected before
@@ -118,7 +129,12 @@ const MaxLogBytes = 64 * 1024 * 1024;
  */
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MaxUploadBytes, files: 2, fields: 20, fieldSize: 64 * 1024 },
+  limits: {
+    fileSize: MaxUploadBytes,
+    files: MaxImagesPerTest + 1,
+    fields: 20,
+    fieldSize: 64 * 1024
+  },
   fileFilter: (req, _file, callback) => {
     const { body }: { body: unknown } = req;
     const runnerID =
@@ -224,7 +240,7 @@ export function registerRoutes(app: express.Application) {
     '/api/submit-test',
     limiters.runner,
     upload.fields([
-      { name: 'file', maxCount: 1 },
+      ...ImageFields.map((name) => ({ name: name, maxCount: 1 })),
       { name: 'log', maxCount: 1 }
     ]),
     requireRunner,
@@ -266,7 +282,9 @@ function handleApi(_req: express.Request, res: express.Response) {
         The type must be either 'reference', 'candidate', 'difference',
         "reference-thumbnail", "candidate-thumbnail", "difference-thumbnail", or "log".
         For all but the last option, the result will be an image file, for the "log"
-        option, the result will be a text file.`
+        option, the result will be a text file. These types return the first image of a
+        test. If a test has more images, the number of the image is added to the type, for
+        example "candidate-2" or "candidate-2-thumbnail". Each test run only has one log.`
     },
     {
       path: '/api/result/:type/:group/:name/:hardware/:timestamp?',
@@ -280,7 +298,8 @@ function handleApi(_req: express.Request, res: express.Response) {
         images or the candidate images for two hardware setups for the same test and runs
         a comparison image on those. These images are not cached and thus this API call
         will take some time to finish. The 'type' must be either "reference" or
-        "candidate". The ratio of changed pixels is returned in the 'Result' and
+        "candidate", optionally followed by the number of the image, for example
+        "candidate-2". The ratio of changed pixels is returned in the 'Result' and
         'X-Pixel-Error' response headers. This call is rate limited.`
     },
     {
@@ -292,12 +311,15 @@ function handleApi(_req: express.Request, res: express.Response) {
     {
       path: '/api/test-records',
       description: `Returns all of the tests as a JSON object. For each test, only the
-        ${SummaryRunCount} most recent test results are included`
+        ${SummaryRunCount} most recent test results are included. The 'pixelError' of a
+        test result is the largest error of all of its images. Test results with more than
+        one image also have an 'images' array with the 'pixelError' of each image`
     },
     {
       path: '/api/test-history/:application/:group/:name/:hardware',
       description: `Returns all of the test results for a specific 'application',
-        'group', 'name', and 'hardware' as a JSON object, sorted by their timestamp`
+        'group', 'name', and 'hardware' as a JSON object, sorted by their timestamp. The
+        test results have the same form as in '/api/test-records'`
     },
     {
       path: '/api/config',
@@ -337,7 +359,10 @@ function handleApi(_req: express.Request, res: express.Response) {
         letters, digits, '.', '_', and '-'. Furthermore, there needs to be the candidate
         image as a PNG file in the 'file' field (at most ${MaxImageDimension}x${MaxImageDimension}
         pixels and ${mib(MaxUploadBytes)}) and the log of the test run in the 'log'
-        field (at most ${mib(MaxLogBytes)}). A test run with the same timestamp must
+        field (at most ${mib(MaxLogBytes)}). A test that creates more than one image sends
+        the other images in the fields 'file2', 'file3', and so on, up to
+        'file${MaxImagesPerTest}'. The images must always be submitted in the same order
+        and the numbers must not have gaps. A test run with the same timestamp must
         not exist yet, otherwise status 409 is returned.`
     },
     {
@@ -347,15 +372,17 @@ function handleApi(_req: express.Request, res: express.Response) {
         body of the message must contain a 'runnerID', 'hardware', 'group', and 'name'.
         Optionally, the body can contain an 'application' field that names the
         application that generated the test. If this field is omitted, the test is
-        attributed to the "openspace" application. Furthermore, there needs to be the
-        candidate image as a PNG file in the 'file' field. The API returns the
+        attributed to the "openspace" application. For a test with multiple images, the
+        optional 'image' field contains the number of the image to compare against, which
+        defaults to the first image. Furthermore, there needs to be the candidate image as
+        a PNG file in the 'file' field. The API returns the
         difference image and the ratio of changed pixels in the 'Result' and
         'X-Pixel-Error' response headers.`
     },
     {
       path: '/api/update-reference',
-      description: `(Requires admin) Makes the candidate image of the latest test run of a
-        specific test the new reference image. The admin token has to be sent in an
+      description: `(Requires admin) Makes the candidate images of the latest test run of a
+        specific test the new reference images. The admin token has to be sent in an
         'Authorization: Bearer <token>' header. The JSON object in the body must provide
         the 'hardware', 'group', and 'name' of the test whose reference should be
         updated. Optionally, the body can contain an 'application' field that names the
@@ -407,7 +434,8 @@ function handleResultLegacy(req: express.Request, res: express.Response) {
 /**
  * Returns a single requested result. The URL parameters used for this function are:
  *  - `type`: One of "reference", "candidate", "difference", "reference-thumbnail",
- *            "candidate-thumbnail", "difference-thumbnail", or "log"
+ *            "candidate-thumbnail", "difference-thumbnail", or "log". For all but "log",
+ *            the number of an image can be added, for example "candidate-2-thumbnail"
  *  - `application`: The name of the application that generated the test
  *  - `group`: The name of the test's group for which to return the image
  *  - `name`: The name of the test for which to return the image
@@ -438,7 +466,7 @@ function serveResult(res: express.Response, params: unknown) {
   // earlier one than the timestamp that was requested
   const headers = { Timestamp: data.timeStamp.toISOString() };
 
-  if (type == 'log') {
+  if (type.kind == 'log') {
     const log = testRunLog(application, group, name, hardware, data.timeStamp);
     res
       .status(200)
@@ -448,32 +476,27 @@ function serveResult(res: express.Response, params: unknown) {
     return;
   }
 
+  const image = data.images.find((i) => i.image == type.image);
+  if (image == null) {
+    throw new NotFoundError(`The test run does not have an image ${type.image}`);
+  }
+
   let file = '';
-  let isThumbnail = false;
-  switch (type) {
-    case 'reference-thumbnail':
-      isThumbnail = true;
-    // falls through
+  switch (type.kind) {
     case 'reference':
-      file = testReferenceImage(application, group, name, hardware, data);
+      file = testReferenceImage(application, group, name, hardware, data, image.image);
       break;
-    case 'candidate-thumbnail':
-      isThumbnail = true;
-    // falls through
     case 'candidate':
-      file = candidateImage(application, group, name, hardware, data);
+      file = candidateImage(application, group, name, hardware, image);
       break;
-    case 'difference-thumbnail':
-      isThumbnail = true;
-    // falls through
     case 'difference':
-      file = differenceImage(application, group, name, hardware, data);
+      file = differenceImage(application, group, name, hardware, image);
       break;
     default:
       break;
   }
 
-  if (isThumbnail) {
+  if (type.thumbnail) {
     file = thumbnailForImage(file);
   }
   if (!fs.existsSync(file)) {
@@ -505,7 +528,8 @@ function handleCompareLegacy(req: express.Request, res: express.Response) {
  * candidate images for two hardware setups for the same test and runs a comparison image
  * on those. The image is generated in memory and is not cached. The URL parameters used
  * for this function are:
- *  - `type`: Must be either "reference" or "candidate"
+ *  - `type`: Must be either "reference" or "candidate", optionally followed by the number
+ *            of the image, for example "candidate-2"
  *  - `application`: The name of the application that generated the test
  *  - `group`: The name of the test's group for which to return the comparison
  *  - `name`: The name of the test for which to return the comparison
@@ -521,23 +545,28 @@ function serveCompare(res: express.Response, params: unknown) {
 
   let file1;
   let file2;
-  if (type == 'reference') {
+  if (type.kind == 'reference') {
     if (
       !hasReferenceImage(application, group, name, hardware1) ||
       !hasReferenceImage(application, group, name, hardware2)
     ) {
       throw new NotFoundError(`No reference image for ${hardware1} or ${hardware2}`);
     }
-    file1 = referenceImage(application, group, name, hardware1);
-    file2 = referenceImage(application, group, name, hardware2);
+    file1 = referenceImage(application, group, name, hardware1, type.image);
+    file2 = referenceImage(application, group, name, hardware2, type.image);
   } else {
     const data1 = latestTestRun(application, group, name, hardware1);
     const data2 = latestTestRun(application, group, name, hardware2);
     if (data1 == null || data2 == null) {
       throw new NotFoundError(`No test found for ${hardware1} or ${hardware2}`);
     }
-    file1 = candidateImage(application, group, name, hardware1, data1);
-    file2 = candidateImage(application, group, name, hardware2, data2);
+    const image1 = data1.images.find((i) => i.image == type.image);
+    const image2 = data2.images.find((i) => i.image == type.image);
+    if (image1 == null || image2 == null) {
+      throw new NotFoundError(`No image ${type.image} for ${hardware1} or ${hardware2}`);
+    }
+    file1 = candidateImage(application, group, name, hardware1, image1);
+    file2 = candidateImage(application, group, name, hardware2, image2);
   }
 
   if (!fs.existsSync(file1) || !fs.existsSync(file2)) {
@@ -557,11 +586,37 @@ function serveCompare(res: express.Response, params: unknown) {
 }
 
 /**
+ * Converts a test run into the form in which it is returned by the API. The pixel error is
+ * the largest error of all images, so that a change in any image is noticed. The other
+ * values of the images are only part of the response for test runs with multiple images.
+ *
+ * @param data The test run that should be converted
+ * @returns The object that is sent to the caller
+ */
+function toResponse(data: TestData) {
+  const { images, ...run } = data;
+  const first = images[0]!;
+  return {
+    ...run,
+    pixelError: Math.max(...images.map((image) => image.pixelError)),
+    candidateImage: first.candidateImage,
+    differenceImage: first.differenceImage,
+    ...(images.length > 1
+      ? { images: images.map((image) => ({ pixelError: image.pixelError })) }
+      : {})
+  };
+}
+
+/**
  * Returns a full list of the tests to the API caller. Each test only contains its most
  * recent test runs. This API call has no further parameters.
  */
 function handleTestRecords(_req: express.Request, res: express.Response) {
-  res.status(200).json(latestTestRecords(SummaryRunCount));
+  const records = latestTestRecords(SummaryRunCount).map((record) => ({
+    ...record,
+    data: record.data.map(toResponse)
+  }));
+  res.status(200).json(records);
 }
 
 /**
@@ -583,7 +638,7 @@ function handleTestHistory(req: express.Request, res: express.Response) {
     );
   }
 
-  res.status(200).json(history);
+  res.status(200).json(history.map(toResponse));
 }
 
 /**
@@ -675,6 +730,7 @@ type RunKey = {
  *
  * @param kind Whether the image is a candidate or a difference image
  * @param run The test run to which the image belongs
+ * @param image The 1-based number of the image
  * @param buffer The contents of the PNG file
  * @param created The list of files created by the current operation, to which the newly
  *        written files are added so that they can be removed if the operation fails
@@ -684,23 +740,29 @@ type RunKey = {
 async function storeImage(
   kind: HashedImage,
   run: RunKey,
+  image: number,
   buffer: Buffer,
   created: string[]
 ): Promise<{ owner: Date; hash: string }> {
   const { application, group, name, hardware, timestamp } = run;
 
   const hash = await pixelHash(buffer);
-  const owner = findImageByHash(kind, application, group, name, hardware, hash);
+  const owner = findImageByHash(kind, application, group, name, hardware, image, hash);
   if (
     owner != null &&
-    fs.existsSync(`${testPath(application, group, name, hardware, owner)}/${kind}.png`)
+    fs.existsSync(
+      imageFile(
+        `${testPath(application, group, name, hardware, owner)}/${kind}.png`,
+        image
+      )
+    )
   ) {
     return { owner: owner, hash: hash };
   }
 
   const folder = testPath(application, group, name, hardware, timestamp);
   fs.mkdirSync(folder, { recursive: true });
-  const file = `${folder}/${kind}.png`;
+  const file = imageFile(`${folder}/${kind}.png`, image);
   for (const f of [file, thumbnailForImage(file)]) {
     if (!fs.existsSync(f)) {
       created.push(f);
@@ -743,6 +805,9 @@ function removeCreatedFiles(created: string[]) {
  * For the files, the following are needed:
  *   - `file`: The generated candidate file
  *   - `log`: The log file of the test run
+ *
+ * For tests with multiple images, the following files are also needed:
+ *   - `file2`, `file3`, ...: The other generated candidate files, without any gaps
  */
 async function handleSubmitTest(req: express.Request, res: express.Response) {
   const body = parse(SubmitTestSchema, req.body);
@@ -755,9 +820,15 @@ async function handleSubmitTest(req: express.Request, res: express.Response) {
   }
 
   const files = (req.files ?? {}) as Record<string, Express.Multer.File[] | undefined>;
-  const file = files['file']?.[0];
-  if (file == null) {
+  const images = ImageFields.map((field) => files[field]?.[0]);
+  if (images[0] == null) {
     throw new ValidationError("Missing file 'file'");
+  }
+  const nImages = images.filter((image) => image != null).length;
+  if (images.slice(0, nImages).some((image) => image == null)) {
+    throw new ValidationError(
+      `The images must be numbered without gaps, '${ImageFields[images.indexOf(undefined)]}' is missing`
+    );
   }
   const log = files['log']?.[0];
   if (log == null) {
@@ -769,8 +840,12 @@ async function handleSubmitTest(req: express.Request, res: express.Response) {
     );
   }
 
-  const candidate = decodeUploadedPng(file.buffer);
-  requireApplicationSize(application, candidate);
+  const submitted = images.slice(0, nImages).map((image) => {
+    const { buffer } = image!;
+    const candidate = decodeUploadedPng(buffer);
+    requireApplicationSize(application, candidate);
+    return { file: buffer, candidate: candidate };
+  });
 
   const logContent = log.buffer
     .toString()
@@ -783,8 +858,7 @@ async function handleSubmitTest(req: express.Request, res: express.Response) {
   await TestLocks.run(testLockKey(application, group, name, hardware), () =>
     storeTestRun({
       ...body,
-      file: file.buffer,
-      candidate: candidate,
+      images: submitted,
       log: logContent,
       nErrors: nLogLines
     })
@@ -803,8 +877,7 @@ async function storeTestRun(run: {
   timestamp: Date;
   timing: number;
   commitHash: string;
-  file: Buffer;
-  candidate: PNG;
+  images: { file: Buffer; candidate: PNG }[];
   log: string;
   nErrors: number;
 }) {
@@ -817,62 +890,86 @@ async function storeTestRun(run: {
     );
   }
 
-  // The comparison is done before any file is written so that a rejected candidate does
-  // not leave any files behind. If there is no reference yet, the candidate becomes the
-  // reference image
+  // The comparisons are done before any file is written so that a rejected candidate does
+  // not leave any files behind. If there is no reference for an image yet, the candidate
+  // becomes the reference image
   const hasReference = hasReferenceImage(application, group, name, hardware);
-  let reference = hasReference
-    ? referenceImage(application, group, name, hardware)
-    : null;
-  const referencePng = reference ? readPng(reference) : run.candidate;
-  const comparison = compareImages(referencePng, run.candidate);
-  if (comparison == null) {
-    throw new ValidationError(resolutionMismatch(referencePng, run.candidate));
-  }
+  const comparisons = run.images.map(({ candidate }, i) => {
+    const image = i + 1;
+    let reference = candidate;
+    if (hasReference) {
+      const file = referenceImage(application, group, name, hardware, image);
+      // Only the first image always has a reference, as a test might have gained an image
+      if (image == 1 || fs.existsSync(file)) {
+        reference = readPng(file);
+      }
+    }
+    const comparison = compareImages(reference, candidate);
+    if (comparison == null) {
+      throw new ValidationError(resolutionMismatch(reference, candidate));
+    }
+    return comparison;
+  });
 
   printAudit(`Submitting result for (${test}/${timestamp.toISOString()})`);
 
   const created: string[] = [];
   try {
-    if (reference == null) {
-      printAudit('  No reference image found');
-      // We are either the first, or someone has marked the previous reference as not valid
-      reference = newReferenceImagePath(application, group, name, hardware, timestamp);
-      created.push(reference, thumbnailForImage(reference));
-      fs.writeFileSync(reference, run.file);
-      await createThumbnail(reference);
+    // The name of the reference for the first image is also the base for all other images
+    const firstReference = hasReference
+      ? referenceImage(application, group, name, hardware)
+      : newReferenceImagePath(application, group, name, hardware, timestamp);
+
+    const images: TestImage[] = [];
+    const hashes: { candidate: string; difference: string }[] = [];
+    for (const [i, { file }] of run.images.entries()) {
+      const image = i + 1;
+      const reference = imageFile(firstReference, image);
+      if (!fs.existsSync(reference)) {
+        // We are either the first, or someone has marked the previous reference as not
+        // valid, or this image has been added to the test
+        printAudit(`  No reference image found for image ${image}`);
+        created.push(reference, thumbnailForImage(reference));
+        fs.writeFileSync(reference, file);
+        await createThumbnail(reference);
+      }
+
+      // Images that already exist in previous test runs are reused instead of being stored
+      // a second time. If all images already existed, this test run does not have a folder
+      const storedCandidate = await storeImage('candidate', run, image, file, created);
+      const comparison = comparisons[i]!;
+      const storedDifference = await storeImage(
+        'difference',
+        run,
+        image,
+        PNG.sync.write(comparison.image),
+        created
+      );
+
+      images.push({
+        image: image,
+        pixelError: comparison.error,
+        candidateImage: storedCandidate.owner,
+        differenceImage: storedDifference.owner
+      });
+      hashes.push({ candidate: storedCandidate.hash, difference: storedDifference.hash });
     }
 
-    // Images that already exist in previous test runs are reused instead of being stored
-    // a second time. If both images already existed, this test run does not have a folder
-    const candidate = await storeImage('candidate', run, run.file, created);
-    const difference = await storeImage(
-      'difference',
-      run,
-      PNG.sync.write(comparison.image),
-      created
-    );
-
+    const referenceFile = path.basename(firstReference);
     const data: TestData = {
-      pixelError: comparison.error,
       timeStamp: timestamp,
       timing: run.timing,
       nErrors: run.nErrors,
       commitHash: run.commitHash,
-      referenceImage: path.basename(reference),
-      candidateImage: candidate.owner,
-      differenceImage: difference.owner
+      referenceImage: referenceFile,
+      images: images
     };
 
-    const referenceFile = path.basename(reference);
     inTransaction(() => {
       if (!hasReference) {
         setReferencePointer(application, group, name, hardware, referenceFile);
       }
-      insertTestRun(application, group, name, hardware, data, run.log, {
-        candidate: candidate.hash,
-        difference: difference.hash
-      });
+      insertTestRun(application, group, name, hardware, data, run.log, hashes);
     });
   } catch (e: unknown) {
     removeCreatedFiles(created);
@@ -897,12 +994,14 @@ async function storeTestRun(run: {
  * For the body, the following field is optional:
  *   - `application`: The name of the application that generated the test. If this field
  *     is omitted, the test is attributed to the "openspace" application
+ *   - `image`: The 1-based number of the image to compare against, which is the first image
+ *     if this field is omitted
  *
  * For the files, the following are needed:
  *   - `file`: The generated candidate file
  */
 function handleRunTest(req: express.Request, res: express.Response) {
-  const { application, group, name, hardware } = parse(RunTestSchema, req.body);
+  const { application, group, name, hardware, image } = parse(RunTestSchema, req.body);
   requireApplication(application);
 
   if (req.file == null) {
@@ -915,7 +1014,13 @@ function handleRunTest(req: express.Request, res: express.Response) {
     throw new NotFoundError('Error comparing, no reference image found');
   }
 
-  const reference = readPng(referenceImage(application, group, name, hardware));
+  const referenceFile = referenceImage(application, group, name, hardware, image);
+  if (!fs.existsSync(referenceFile)) {
+    throw new NotFoundError(
+      `Error comparing, no reference image found for image ${image}`
+    );
+  }
+  const reference = readPng(referenceFile);
   const comparison = compareImages(reference, candidate);
   if (comparison == null) {
     throw new ValidationError(resolutionMismatch(reference, candidate));
@@ -924,8 +1029,8 @@ function handleRunTest(req: express.Request, res: express.Response) {
 }
 
 /**
- * Updates the current reference for a specific test. The latest candidate image will be
- * upgraded to a reference image and the latest test will be updated to reflect this. This
+ * Updates the current reference for a specific test. The latest candidate images will be
+ * upgraded to reference images and the latest test will be updated to reflect this. This
  * API call requires the admin token. The payload of this call must be a JSON object with
  * the following values:
  *   - `hardware`: The hardware for which to update the reference image
@@ -945,7 +1050,7 @@ async function handleUpdateReference(req: express.Request, res: express.Response
 }
 
 /**
- * Makes the candidate image of the latest test run the new reference image of the test.
+ * Makes the candidate images of the latest test run the new reference images of the test.
  * This has to be called while holding the lock of the test.
  */
 async function promoteLatestCandidate(
@@ -963,16 +1068,18 @@ async function promoteLatestCandidate(
     );
   }
 
-  const candidateFile = candidateImage(application, group, name, hardware, data);
-  assert(fs.existsSync(candidateFile), `Candidate image ${candidateFile} does not exist`);
+  for (const image of data.images) {
+    const file = candidateImage(application, group, name, hardware, image);
+    assert(fs.existsSync(file), `Candidate image ${file} does not exist`);
+  }
 
   printAudit(
     `Updating reference for (${application}, ${group}, ${name}, ${hardware}) ` +
       `requested by ${requester}`
   );
 
-  // The new reference image is named after the timestamp of the latest test
-  const newReference = newReferenceImagePath(
+  // The new reference images are named after the timestamp of the latest test
+  const firstReference = newReferenceImagePath(
     application,
     group,
     name,
@@ -982,50 +1089,59 @@ async function promoteLatestCandidate(
 
   const created: string[] = [];
   try {
-    // Make the last candidate image the new reference image by copying it over. If the
-    // file already exists, the same test run was promoted before and the file is identical
-    if (!fs.existsSync(newReference)) {
-      created.push(newReference);
-      fs.copyFileSync(candidateFile, newReference);
-    }
-    if (!fs.existsSync(thumbnailForImage(newReference))) {
-      created.push(thumbnailForImage(newReference));
-      await createThumbnail(newReference);
-    }
+    const updates: { image: TestImage; hash: string }[] = [];
+    for (const image of data.images) {
+      const candidateFile = candidateImage(application, group, name, hardware, image);
+      const newReference = imageFile(firstReference, image.image);
 
-    // The difference image of the candidate is now out of date. Since the candidate is the
-    // reference, the comparison cannot fail because of mismatching sizes
-    const candidate = readPng(candidateFile);
-    const comparison = compareImages(candidate, candidate);
-    assert(comparison != null, 'Comparing the candidate with itself failed');
-    const difference = await storeImage(
-      'difference',
-      { application, group, name, hardware, timestamp: data.timeStamp },
-      PNG.sync.write(comparison.image),
-      created
-    );
+      // Make the last candidate image the new reference image by copying it over. If the
+      // file already exists, the same test run was promoted before and the file is
+      // identical
+      if (!fs.existsSync(newReference)) {
+        created.push(newReference);
+        fs.copyFileSync(candidateFile, newReference);
+      }
+      if (!fs.existsSync(thumbnailForImage(newReference))) {
+        created.push(thumbnailForImage(newReference));
+        await createThumbnail(newReference);
+      }
 
-    inTransaction(() => {
-      setReferencePointer(
-        application,
-        group,
-        name,
-        hardware,
-        path.basename(newReference)
+      // The difference image of the candidate is now out of date. Since the candidate is
+      // the reference, the comparison cannot fail because of mismatching sizes
+      const candidate = readPng(candidateFile);
+      const comparison = compareImages(candidate, candidate);
+      assert(comparison != null, 'Comparing the candidate with itself failed');
+      const difference = await storeImage(
+        'difference',
+        { application, group, name, hardware, timestamp: data.timeStamp },
+        image.image,
+        PNG.sync.write(comparison.image),
+        created
       );
-      updateTestRun(
-        application,
-        group,
-        name,
-        hardware,
-        {
-          ...data,
+      updates.push({
+        image: {
+          ...image,
           pixelError: comparison.error,
-          referenceImage: path.basename(newReference),
           differenceImage: difference.owner
         },
-        difference.hash
+        hash: difference.hash
+      });
+    }
+
+    const referenceFile = path.basename(firstReference);
+    inTransaction(() => {
+      setReferencePointer(application, group, name, hardware, referenceFile);
+      updateRunReference(
+        application,
+        group,
+        name,
+        hardware,
+        data.timeStamp,
+        referenceFile
       );
+      for (const { image, hash } of updates) {
+        updateRunImage(application, group, name, hardware, data.timeStamp, image, hash);
+      }
     });
   } catch (e: unknown) {
     removeCreatedFiles(created);

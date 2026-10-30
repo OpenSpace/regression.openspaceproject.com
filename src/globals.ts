@@ -27,7 +27,7 @@ import fs from 'fs';
 import { assert } from './assert';
 import { referencePointer } from './database';
 import { DataFolder } from './paths';
-import { TestData } from './testrecords';
+import { TestData, TestImage } from './testrecords';
 
 /**
  * Converts the provided `date` to a version in which it can be used as part of a path in
@@ -50,6 +50,23 @@ export function thumbnailForImage(path: string): string {
   const ext = path.substring(path.lastIndexOf('.'));
   const base = path.substring(0, path.lastIndexOf('.'));
   return `${base}-thumbnail${ext}`;
+}
+
+/**
+ * Returns the path of the file that stores the image with the number `image` of a test
+ * run. The first image uses the provided path, all others have their number appended.
+ *
+ * @param path The path to the file of the first image
+ * @param image The 1-based number of the image
+ * @returns The path to the file of the requested image
+ */
+export function imageFile(path: string, image: number): string {
+  if (image == 1) {
+    return path;
+  }
+  const ext = path.substring(path.lastIndexOf('.'));
+  const base = path.substring(0, path.lastIndexOf('.'));
+  return `${base}-${image}${ext}`;
 }
 
 /**
@@ -114,22 +131,28 @@ export function hasReferenceImage(
  * @param group The name of the group for which to return the current reference image
  * @param name The name of the test for which to return the current reference image
  * @param hardware The hardware for which to return the current reference image
- * @returns The path to the current reference image for the requested test
+ * @param image The 1-based number of the image
+ * @returns The path to the current reference image for the requested test. If the test
+ *          did not have this image so far, the file does not exist
  */
 export function referenceImage(
   application: string,
   group: string,
   name: string,
-  hardware: string
+  hardware: string,
+  image = 1
 ): string {
   const pointer = referencePointer(application, group, name, hardware);
   assert(pointer != null, 'No reference image found');
 
-  return `${referenceImagePath(application, group, name, hardware)}/${pointer}`;
+  return imageFile(
+    `${referenceImagePath(application, group, name, hardware)}/${pointer}`,
+    image
+  );
 }
 
 /**
- * Returns the path at which a new reference image that is created from the test run at
+ * Returns the path at which the first image of a new reference that is created from the test run at
  * `timestamp` is stored and creates the folder for it if necessary. The reference pointer
  * is not changed; that has to happen once the image has been written.
  *
@@ -138,7 +161,7 @@ export function referenceImage(
  * @param name The name of the test for which to create the reference image
  * @param hardware The hardware for which to create the reference image
  * @param timestamp The time stamp of the test run from which the reference is created
- * @returns The path to the new reference image
+ * @returns The path to the first image of the new reference, see `imageFile`
  */
 export function newReferenceImagePath(
   application: string,
@@ -162,6 +185,7 @@ export function newReferenceImagePath(
  * @param name The name of the test for which to return the reference image
  * @param hardware The hardware for which to return the reference image
  * @param data The test run for which to return the reference image
+ * @param image The 1-based number of the image
  * @returns The path to the reference image of the requested test run
  */
 export function testReferenceImage(
@@ -169,13 +193,17 @@ export function testReferenceImage(
   group: string,
   name: string,
   hardware: string,
-  data: TestData
+  data: TestData,
+  image = 1
 ): string {
-  return `${referenceImagePath(application, group, name, hardware)}/${data.referenceImage}`;
+  return imageFile(
+    `${referenceImagePath(application, group, name, hardware)}/${data.referenceImage}`,
+    image
+  );
 }
 
 /**
- * Returns the path to the candidate image of the test run `data` of the test identified by
+ * Returns the path to the file of the candidate image `image` of the test identified by
  * the `application`, `group`, `name`, and `hardware`. As candidate images are shared
  * between test runs, the image might be stored in the folder of an earlier test run.
  *
@@ -183,39 +211,41 @@ export function testReferenceImage(
  * @param group The name of the group for which to return the candidate image
  * @param name The name of the test for which to return the candidate image
  * @param hardware The hardware for which to return the candidate image
- * @param data The test run for which to return the candidate image
- * @returns The path to the candidate image of the requested test run
+ * @param image The image of the test run for which to return the candidate image
+ * @returns The path to the requested candidate image
  */
 export function candidateImage(
   application: string,
   group: string,
   name: string,
   hardware: string,
-  data: TestData
+  image: TestImage
 ): string {
-  return `${testPath(application, group, name, hardware, data.candidateImage)}/candidate.png`;
+  const folder = testPath(application, group, name, hardware, image.candidateImage);
+  return imageFile(`${folder}/candidate.png`, image.image);
 }
 
 /**
- * Returns the path to the difference image of the test run `data` of the test identified
- * by the `application`, `group`, `name`, and `hardware`. As difference images are shared
+ * Returns the path to the file of the difference image `image` of the test identified by
+ * the `application`, `group`, `name`, and `hardware`. As difference images are shared
  * between test runs, the image might be stored in the folder of an earlier test run.
  *
  * @param application The name of the application that generated the test
  * @param group The name of the group for which to return the difference image
  * @param name The name of the test for which to return the difference image
  * @param hardware The hardware for which to return the difference image
- * @param data The test run for which to return the difference image
- * @returns The path to the difference image of the requested test run
+ * @param image The image of the test run for which to return the difference image
+ * @returns The path to the requested difference image
  */
 export function differenceImage(
   application: string,
   group: string,
   name: string,
   hardware: string,
-  data: TestData
+  image: TestImage
 ): string {
-  return `${testPath(application, group, name, hardware, data.differenceImage)}/difference.png`;
+  const folder = testPath(application, group, name, hardware, image.differenceImage);
+  return imageFile(`${folder}/difference.png`, image.image);
 }
 
 /**

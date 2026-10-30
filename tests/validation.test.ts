@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { ValidationError } from '../src/errors';
-import { NameSchema, parse, parseTimestamp, SubmitTestSchema } from '../src/validation';
+import {
+  NameSchema,
+  parse,
+  parseResultType,
+  parseTimestamp,
+  SubmitTestSchema
+} from '../src/validation';
 
 describe('NameSchema', () => {
   it.each(['openspace', 'windows-nvidia', 'apollo_8', 'v1.2', 'A1'])(
@@ -61,6 +67,49 @@ describe('parseTimestamp', () => {
     '1718100000'
   ])('rejects %j', (value) => {
     expect(parseTimestamp(value)).toBeNull();
+  });
+});
+
+describe('parseResultType', () => {
+  it('uses the first image if no number is provided', () => {
+    expect(parseResultType('candidate')).toEqual({
+      kind: 'candidate',
+      image: 1,
+      thumbnail: false
+    });
+    expect(parseResultType('reference-thumbnail')).toEqual({
+      kind: 'reference',
+      image: 1,
+      thumbnail: true
+    });
+    expect(parseResultType('log')).toEqual({ kind: 'log' });
+  });
+
+  it('parses the number of the image', () => {
+    expect(parseResultType('candidate-1')).toEqual({
+      kind: 'candidate',
+      image: 1,
+      thumbnail: false
+    });
+    expect(parseResultType('difference-2-thumbnail')).toEqual({
+      kind: 'difference',
+      image: 2,
+      thumbnail: true
+    });
+  });
+
+  it.each([
+    '',
+    'invalid',
+    'candidate-0',
+    'candidate-02',
+    'candidate-',
+    'candidate-x',
+    'candidate-thumbnail-2',
+    'log-2',
+    'log-thumbnail'
+  ])('rejects %j', (value) => {
+    expect(parseResultType(value)).toBeNull();
   });
 });
 

@@ -8,6 +8,14 @@ function joinPath(...parts: string[]): string {
 }
 
 /**
+ * Adds the number of an image to a type, for example "candidate-thumbnail" becomes
+ * "candidate-2-thumbnail". The first image does not have a number in its URL.
+ */
+function typeOfImage(type: string, image: number): string {
+  return image > 1 ? type.replace(/^[a-z]+/, `$&-${image}`) : type;
+}
+
+/**
  * Returns the URL of a result of a test run (an image, a thumbnail, or the log).
  *
  * @param type The kind of result, for example "candidate" or "difference-thumbnail"
@@ -15,14 +23,22 @@ function joinPath(...parts: string[]): string {
  * @param timestamp The timestamp of the test run. If it is omitted, the latest run is used
  * @param revision If larger than 0, it is added to the URL so that the browser loads the
  *        image again after it has changed on the server
+ * @param image The 1-based number of the image, which is not used for the log
  */
 export function resultUrl(
   type: string,
   test: TestKey,
   timestamp?: string,
-  revision = 0
+  revision = 0,
+  image = 1
 ): string {
-  const parts = [type, test.application, test.group, test.name, test.hardware];
+  const parts = [
+    typeOfImage(type, image),
+    test.application,
+    test.group,
+    test.name,
+    test.hardware
+  ];
   if (timestamp) {
     parts.push(timestamp);
   }
@@ -46,9 +62,10 @@ export function compareUrl(
   group: string,
   name: string,
   hardware1: string,
-  hardware2: string
+  hardware2: string,
+  image = 1
 ): string {
-  return `/api/compare/${joinPath(type, application, group, name, hardware1, hardware2)}`;
+  return `/api/compare/${joinPath(typeOfImage(type, image), application, group, name, hardware1, hardware2)}`;
 }
 
 /**

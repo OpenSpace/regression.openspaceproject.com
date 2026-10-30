@@ -1,5 +1,8 @@
 export interface TestData {
+  /// The largest pixel error of all images of the test run
   pixelError: number;
+  /// The pixel errors of each image. This only exists for runs with more than one image
+  images?: { pixelError: number }[];
   timing: number;
   commitHash: string;
   timeStamp: string;

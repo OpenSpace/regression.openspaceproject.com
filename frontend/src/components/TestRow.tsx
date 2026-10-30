@@ -1,7 +1,17 @@
-import { Anchor, Table, Text, Tooltip } from '@mantine/core';
+import { Anchor, Box, Table, Text, Tooltip } from '@mantine/core';
 
 import { TestData, TestRecord } from '../types';
-import { classifyValues, commitUrl, testLink, timingDisplay, Trend } from '../utils';
+import {
+  classifyValues,
+  commitUrl,
+  imageCount,
+  imageError,
+  pixelErrorDisplay,
+  testLink,
+  timingDisplay,
+  Trend,
+  worstImage
+} from '../utils';
 
 import { CopyLinkButton } from './CopyLinkButton';
 import { ImageThumbnail } from './ImageThumbnail';
@@ -80,6 +90,15 @@ export function TestRow({ record, repository, revision, onOpen }: Props) {
   const commit = commitUrl(repository, latestData.commitHash);
   const label = `${record.application} / ${record.group} / ${record.name} on ${record.hardware}`;
 
+  // Tests with multiple images only show the image that needs the most attention
+  const nImages = imageCount(latestData);
+  const shownImage = worstImage(latestData);
+  const errors = Array.from({ length: nImages }, (_, i) => (
+    <div key={i}>
+      Image {i + 1}: {pixelErrorDisplay(imageError(latestData, i + 1))}
+    </div>
+  ));
+
   return (
     <Table.Tr
       style={{ cursor: 'pointer' }}
@@ -94,7 +113,15 @@ export function TestRow({ record, repository, revision, onOpen }: Props) {
       }}
     >
       <Table.Td style={{ width: 75, maxWidth: 75, whiteSpace: 'nowrap' }}>
-        <PixelDiffNumber value={latestData.pixelError} />
+        {nImages > 1 ? (
+          <Tooltip label={errors} withArrow>
+            <Box w={'fit-content'}>
+              <PixelDiffNumber value={latestData.pixelError} />
+            </Box>
+          </Tooltip>
+        ) : (
+          <PixelDiffNumber value={latestData.pixelError} />
+        )}
         <Tooltip label={diffTooltip} withArrow>
           <Text size={'xs'} c={diffColor}>
             {diffText}
@@ -155,6 +182,8 @@ export function TestRow({ record, repository, revision, onOpen }: Props) {
             revision={revision}
             stopPropagation
             width={ImageWidth}
+            image={shownImage}
+            {...(nImages > 1 ? { badge: `${shownImage}/${nImages}` } : {})}
           />
         </Table.Td>
       ))}

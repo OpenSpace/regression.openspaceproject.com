@@ -5,6 +5,38 @@ export function timingDisplay(timing: number): string {
   return `${Math.round(timing * 1000) / 1000}s`;
 }
 
+export function pixelErrorDisplay(error: number): string {
+  return `${Math.round(error * 100000) / 1000}%`;
+}
+
+/**
+ * Returns the number of images of a test run.
+ */
+export function imageCount(data: TestData): number {
+  return data.images?.length ?? 1;
+}
+
+/**
+ * Returns the pixel error of the image with the 1-based number `image` of a test run.
+ */
+export function imageError(data: TestData, image: number): number {
+  return data.images?.[image - 1]?.pixelError ?? data.pixelError;
+}
+
+/**
+ * Returns the 1-based number of the image with the largest pixel error of a test run. If
+ * multiple images have the same error, the one with the lowest number is returned.
+ */
+export function worstImage(data: TestData): number {
+  let worst = 1;
+  for (let image = 2; image <= imageCount(data); image++) {
+    if (imageError(data, image) > imageError(data, worst)) {
+      worst = image;
+    }
+  }
+  return worst;
+}
+
 /**
  * Returns the URL of the commit `commitHash` in the `repository`, or `null` if the
  * repository is not known.
@@ -29,21 +61,30 @@ export function githubIssueUrl(
   }
 
   const base = window.location.origin;
-  const image = (type: string) =>
-    `[![${type}](${base}${resultUrl(`${type}-thumbnail`, record, data.timeStamp)})]` +
-    `(${base}${resultUrl(type, record, data.timeStamp)})`;
+  const nImages = imageCount(data);
+  const image = (type: string, n: number) =>
+    `[![${type}](${base}${resultUrl(`${type}-thumbnail`, record, data.timeStamp, 0, n)})]` +
+    `(${base}${resultUrl(type, record, data.timeStamp, 0, n)})`;
+  const imageRows = Array.from({ length: nImages }, (_, i) => {
+    const n = i + 1;
+    const label =
+      nImages > 1 ? `Image ${n} (${pixelErrorDisplay(imageError(data, n))}) | ` : '';
+    return `| ${label}${image('candidate', n)} | ${image('reference', n)} | ${image('difference', n)} |`;
+  });
 
   const title = `Failing image test: ${record.hardware}/${record.group}/${record.name}`;
   const body = [
     `**Test:** ${record.application} / ${record.group} / ${record.name}`,
     `**Hardware:** ${record.hardware}`,
     `**Run:** ${data.timeStamp} on commit [${data.commitHash.substring(0, 8)}](${commitUrl(repository, data.commitHash)})`,
-    `**Pixel error:** ${Math.round(data.pixelError * 100000) / 1000}%`,
+    `**Pixel error:** ${pixelErrorDisplay(data.pixelError)}`,
     `**Log:** [${data.nErrors} errors](${base}${resultUrl('log', record, data.timeStamp)})`,
     '',
-    '| Candidate | Reference | Difference |',
-    '|---|---|---|',
-    `| ${image('candidate')} | ${image('reference')} | ${image('difference')} |`
+    nImages > 1
+      ? '| Image | Candidate | Reference | Difference |'
+      : '| Candidate | Reference | Difference |',
+    nImages > 1 ? '|---|---|---|---|' : '|---|---|---|',
+    ...imageRows
   ].join('\n');
 
   const params = new URLSearchParams({ title, body });

@@ -19,7 +19,11 @@ The database is written to a temporary file and only renamed to testresults.db o
 data has been inserted and verified. Afterwards, the migrated data.json, log.txt, and
 ref.txt files are deleted and the run folders that end up empty are removed. If the
 script is interrupted while deleting files, running it again checks the remaining files
-against the database and finishes the cleanup.
+against the database and finishes the cleanup. This only works as long as
+2-migrate_to_multiple_images.py has not been run yet.
+
+This script creates a database with schema version 1. Run
+2-migrate_to_multiple_images.py afterwards to upgrade it to the current version.
 
 Make a backup of the data folder before running this script without --dry-run.
 
@@ -48,9 +52,9 @@ FOLDER_TIMESTAMP = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-# Keep this in sync with the schema in src/database.ts. The candidate_hash and
-# difference_hash columns are left empty by this script; the server computes them from the
-# images when it starts
+# This is version 1 of the schema, which 2-migrate_to_multiple_images.py upgrades to the
+# schema in src/database.ts. The candidate_hash and difference_hash columns are left empty
+# by this script; the server computes them from the images when it starts
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS test_runs (
   id               INTEGER PRIMARY KEY,

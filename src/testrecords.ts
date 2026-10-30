@@ -38,12 +38,13 @@ import {
   setImageHash,
   testHistory,
   TestKeyParts,
-  updateTestRun
+  updateRunImage
 } from './database';
 import { reportError } from './errorHandling';
 import {
   candidateImage,
   differenceImage,
+  imageFile,
   referenceImagePath,
   removeFolderIfEmpty,
   testPath,
@@ -69,10 +70,6 @@ export type TestRecord = {
 };
 
 export type TestData = {
-  /// Contains the pixel error in the image as a value between 0 and 1 as the ratio of
-  /// changed pixels to overall pixels
-  pixelError: number;
-
   /// The timestamp at which this test data was generated
   timeStamp: Date;
 
@@ -85,13 +82,26 @@ export type TestData = {
   /// The commit hash of the OpenSpace repository that was used to generate this image
   commitHash: string;
 
-  /// Path to the reference image that was used for this test
+  /// Name of the file of the first reference image that was used for this test. The names
+  /// of the reference images for the other images are derived from it, see `imageFile`
   referenceImage: string;
 
-  /// The timestamp of the test whose candidate image that was used for this test
+  /// The images of this test run, sorted by their number. There is always at least one
+  images: TestImage[];
+};
+
+export type TestImage = {
+  /// The 1-based position of the image in the test run
+  image: number;
+
+  /// Contains the pixel error in the image as a value between 0 and 1 as the ratio of
+  /// changed pixels to overall pixels
+  pixelError: number;
+
+  /// The timestamp of the test whose candidate image that was used for this image
   candidateImage: Date;
 
-  /// The timestamp for the test whose difference image that was used for this test
+  /// The timestamp for the test whose difference image that was used for this image
   differenceImage: Date;
 };
 
@@ -137,12 +147,17 @@ export function verifyDataFolder() {
   }
 
   for (const { application, group, name, hardware, data } of allTestRuns()) {
-    verifyImage(
-      testReferenceImage(application, group, name, hardware, data),
-      'Reference'
-    );
-    verifyImage(candidateImage(application, group, name, hardware, data), 'Candidate');
-    verifyImage(differenceImage(application, group, name, hardware, data), 'Difference');
+    for (const image of data.images) {
+      verifyImage(
+        testReferenceImage(application, group, name, hardware, data, image.image),
+        'Reference'
+      );
+      verifyImage(candidateImage(application, group, name, hardware, image), 'Candidate');
+      verifyImage(
+        differenceImage(application, group, name, hardware, image),
+        'Difference'
+      );
+    }
   }
 
   if (missing.length > 0) {
@@ -179,7 +194,10 @@ export async function backfillImageHashes() {
         const image = images[next]!;
         next++;
         const { application, group, name, hardware, owner } = image;
-        const file = `${testPath(application, group, name, hardware, owner)}/${kind}.png`;
+        const file = imageFile(
+          `${testPath(application, group, name, hardware, owner)}/${kind}.png`,
+          image.image
+        );
         if (!fs.existsSync(file)) {
           missing++;
           continue;
@@ -195,7 +213,7 @@ export async function backfillImageHashes() {
     inTransaction(() => {
       for (const { image, hash } of hashes) {
         const { application, group, name, hardware, owner } = image;
-        setImageHash(kind, application, group, name, hardware, owner, hash);
+        setImageHash(kind, application, group, name, hardware, image.image, owner, hash);
       }
     });
     printAudit(`  Computed ${hashes.length} hashes, ${missing} images are missing`);
@@ -292,27 +310,41 @@ async function regenerateTest(test: TestKeyParts) {
 
   // Test runs that use the same reference and candidate image end up with the same
   // difference image. So we only generate it once and store it in the folder of the
-  // earliest of these test runs
-  const runGroups = new Map<string, TestData[]>();
+  // earliest of these test runs. Each image of a test is handled separately
+  type Run = { data: TestData; image: TestImage };
+  const runGroups = new Map<string, Run[]>();
   const previousDifferences = new Set<string>();
   for (const data of testHistory(application, group, name, hardware)) {
-    const key = JSON.stringify([data.referenceImage, data.candidateImage.getTime()]);
-    const runs = runGroups.get(key);
-    if (runs) {
-      runs.push(data);
-    } else {
-      runGroups.set(key, [data]);
+    for (const image of data.images) {
+      const key = JSON.stringify([
+        image.image,
+        data.referenceImage,
+        image.candidateImage.getTime()
+      ]);
+      const runs = runGroups.get(key);
+      if (runs) {
+        runs.push({ data, image });
+      } else {
+        runGroups.set(key, [{ data, image }]);
+      }
+      previousDifferences.add(differenceImage(application, group, name, hardware, image));
     }
-    previousDifferences.add(differenceImage(application, group, name, hardware, data));
   }
 
-  const updates: { data: TestData; pixelError: number; owner: Date; hash: string }[] = [];
+  const updates: { timeStamp: Date; image: TestImage; hash: string }[] = [];
   const currentDifferences = new Set<string>();
   for (const runs of runGroups.values()) {
     // The runs are sorted by timestamp, so the first one is the earliest
-    const data = runs[0]!;
-    const reference = testReferenceImage(application, group, name, hardware, data);
-    const candidate = candidateImage(application, group, name, hardware, data);
+    const { data, image } = runs[0]!;
+    const reference = testReferenceImage(
+      application,
+      group,
+      name,
+      hardware,
+      data,
+      image.image
+    );
+    const candidate = candidateImage(application, group, name, hardware, image);
 
     let comparison: { image: PNG; error: number } | null = null;
     if (fs.existsSync(reference) && fs.existsSync(candidate)) {
@@ -325,14 +357,16 @@ async function regenerateTest(test: TestKeyParts) {
         `  Could not compare the images of (${application}/${group}/${name}/${hardware})`
       );
       for (const run of runs) {
-        currentDifferences.add(differenceImage(application, group, name, hardware, run));
+        currentDifferences.add(
+          differenceImage(application, group, name, hardware, run.image)
+        );
       }
       continue;
     }
 
     const folder = testPath(application, group, name, hardware, data.timeStamp);
     fs.mkdirSync(folder, { recursive: true });
-    const difference = `${folder}/difference.png`;
+    const difference = imageFile(`${folder}/difference.png`, image.image);
     const buffer = PNG.sync.write(comparison.image);
     fs.writeFileSync(difference, buffer);
     await createThumbnail(difference);
@@ -341,9 +375,12 @@ async function regenerateTest(test: TestKeyParts) {
     currentDifferences.add(difference);
     for (const run of runs) {
       updates.push({
-        data: run,
-        pixelError: comparison.error,
-        owner: data.timeStamp,
+        timeStamp: run.data.timeStamp,
+        image: {
+          ...run.image,
+          pixelError: comparison.error,
+          differenceImage: data.timeStamp
+        },
         hash: hash
       });
     }
@@ -351,15 +388,8 @@ async function regenerateTest(test: TestKeyParts) {
   }
 
   inTransaction(() => {
-    for (const { data, pixelError, owner, hash } of updates) {
-      updateTestRun(
-        application,
-        group,
-        name,
-        hardware,
-        { ...data, pixelError: pixelError, differenceImage: owner },
-        hash
-      );
+    for (const { timeStamp, image, hash } of updates) {
+      updateRunImage(application, group, name, hardware, timeStamp, image, hash);
     }
   });
 

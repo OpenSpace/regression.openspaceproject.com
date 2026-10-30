@@ -1,11 +1,9 @@
 import { Box, Text } from '@mantine/core';
 
+import { pixelErrorDisplay } from '../utils';
+
 export function PixelDiffNumber({ value }: { value: number }) {
   const style = diffStyle(value);
-
-  function diffDisplay(diff: number): string {
-    return `${Math.round(diff * 100000) / 1000}%`;
-  }
 
   function diffStyle(diff: number): { backgroundColor: string; color: string } {
     if (diff === 0.0) return { backgroundColor: '#eeeeee', color: '#111111' };
@@ -22,7 +20,7 @@ export function PixelDiffNumber({ value }: { value: number }) {
 
   return (
     <Box px={4} py={2} style={{ borderRadius: 4, display: 'inline-block', ...style }}>
-      <Text size={'sm'}>{diffDisplay(value)}</Text>
+      <Text size={'sm'}>{pixelErrorDisplay(value)}</Text>
     </Box>
   );
 }
