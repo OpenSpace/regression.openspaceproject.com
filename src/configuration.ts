@@ -235,7 +235,23 @@ class Configuration {
     this.adminToken = env.ADMIN_TOKEN ?? '';
     this.runners = config.runners;
     this.preferredHardware = config.preferredHardware ?? [];
-    // Reruns are only possible if Jenkins is configured and the credentials are provided
+    // Reruns are only possible if Jenkins is configured and the credentials are provided.
+    // Only having one of the two is most likely a mistake, so it is pointed out
+    const missing = (['JENKINS_USER', 'JENKINS_TOKEN'] as const).filter(
+      (variable) => env[variable] == null
+    );
+    if (config.jenkins != null && missing.length > 0) {
+      console.warn(
+        `Rerunning tests is disabled: the configuration file has a "jenkins" section, ` +
+          `but ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} not set ` +
+          'in the .env file'
+      );
+    } else if (config.jenkins == null && missing.length < 2) {
+      console.warn(
+        'Rerunning tests is disabled: the Jenkins credentials are set in the .env file, ' +
+          `but the configuration file ${configFile} has no "jenkins" section`
+      );
+    }
     this.jenkins =
       config.jenkins != null && env.JENKINS_USER != null && env.JENKINS_TOKEN != null
         ? { ...config.jenkins, user: env.JENKINS_USER, token: env.JENKINS_TOKEN }

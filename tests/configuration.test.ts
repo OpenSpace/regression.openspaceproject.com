@@ -72,12 +72,15 @@ describe('the Jenkins configuration', () => {
   afterEach(() => {
     delete process.env['JENKINS_USER'];
     delete process.env['JENKINS_TOKEN'];
+    vi.restoreAllMocks();
   });
 
   it('enables reruns for the targets if the credentials are set', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     process.env['JENKINS_USER'] = 'user';
     process.env['JENKINS_TOKEN'] = 'token';
     load({ ...baseConfig, jenkins: jenkins });
+    expect(warn).not.toHaveBeenCalled();
     expect(Config.jenkins?.user).toBe('user');
     expect(Config.jenkins?.token).toBe('token');
     expect(Config.rerunTarget('openspace', 'windows-nvidia')).toEqual({
@@ -92,14 +95,33 @@ describe('the Jenkins configuration', () => {
   });
 
   it('disables reruns without the credentials or the configuration', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     process.env['JENKINS_USER'] = 'user';
     load({ ...baseConfig, jenkins: jenkins });
     expect(Config.jenkins).toBeNull();
     expect(Config.rerunTarget('openspace', 'windows-nvidia')).toBeNull();
+    expect(warn).toHaveBeenLastCalledWith(
+      expect.stringMatching(/JENKINS_TOKEN is not set/)
+    );
 
     process.env['JENKINS_TOKEN'] = 'token';
     load(baseConfig);
     expect(Config.jenkins).toBeNull();
+    expect(warn).toHaveBeenLastCalledWith(expect.stringMatching(/no "jenkins" section/));
+  });
+
+  it('warns about all missing credentials', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    load({ ...baseConfig, jenkins: jenkins });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/JENKINS_USER and JENKINS_TOKEN are not set/)
+    );
+  });
+
+  it('does not warn if Jenkins is not used at all', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    load(baseConfig);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('rejects invalid node labels', () => {
