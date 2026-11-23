@@ -62,8 +62,11 @@ describe('settings of older versions', () => {
 describe('the Jenkins configuration', () => {
   const jenkins = {
     url: 'https://jenkins.test',
-    job: 'image-testing',
-    targets: [{ application: 'openspace', hardware: 'windows-nvidia', node: 'node' }]
+    jobs: { openspace: 'image-testing', sgct: 'SGCT/image-testing' },
+    targets: [
+      { application: 'openspace', hardware: 'windows-nvidia', node: 'node' },
+      { application: 'sgct', hardware: 'windows-nvidia', node: 'sgct-node' }
+    ]
   };
 
   afterEach(() => {
@@ -77,15 +80,22 @@ describe('the Jenkins configuration', () => {
     load({ ...baseConfig, jenkins: jenkins });
     expect(Config.jenkins?.user).toBe('user');
     expect(Config.jenkins?.token).toBe('token');
-    expect(Config.rerunNode('openspace', 'windows-nvidia')).toBe('node');
-    expect(Config.rerunNode('openspace', 'linux-nvidia')).toBeNull();
+    expect(Config.rerunTarget('openspace', 'windows-nvidia')).toEqual({
+      job: 'image-testing',
+      node: 'node'
+    });
+    expect(Config.rerunTarget('sgct', 'windows-nvidia')).toEqual({
+      job: 'SGCT/image-testing',
+      node: 'sgct-node'
+    });
+    expect(Config.rerunTarget('openspace', 'linux-nvidia')).toBeNull();
   });
 
   it('disables reruns without the credentials or the configuration', () => {
     process.env['JENKINS_USER'] = 'user';
     load({ ...baseConfig, jenkins: jenkins });
     expect(Config.jenkins).toBeNull();
-    expect(Config.rerunNode('openspace', 'windows-nvidia')).toBeNull();
+    expect(Config.rerunTarget('openspace', 'windows-nvidia')).toBeNull();
 
     process.env['JENKINS_TOKEN'] = 'token';
     load(baseConfig);
@@ -97,6 +107,18 @@ describe('the Jenkins configuration', () => {
     expect(() =>
       load({ ...baseConfig, jenkins: { ...jenkins, targets: [target] } })
     ).toThrow(/jenkins\.targets\.0\.node/);
+  });
+
+  it('rejects targets of applications without a job and invalid job names', () => {
+    const jobs = { openspace: 'image-testing' };
+    expect(() => load({ ...baseConfig, jenkins: { ...jenkins, jobs: jobs } })).toThrow(
+      /jenkins\.targets\.1\.application/
+    );
+    for (const job of ['', '/image-testing', 'SGCT//image-testing', 'SGCT/']) {
+      expect(() =>
+        load({ ...baseConfig, jenkins: { ...jenkins, jobs: { ...jobs, sgct: job } } })
+      ).toThrow(/jenkins\.jobs\.sgct/);
+    }
   });
 });
 

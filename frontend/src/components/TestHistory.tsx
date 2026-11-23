@@ -189,8 +189,8 @@ export function TestHistory({
       >
         <Stack align={'center'}>
           <Text px={'md'}>
-            Jenkins will build OpenSpace and run the test {record.name} again on{' '}
-            {record.hardware}. Which commit should be built?
+            Jenkins will build {record.application} and run the test {record.name} again
+            on {record.hardware}. Which commit should be built?
           </Text>
           <Group>
             {latest && (

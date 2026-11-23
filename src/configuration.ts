@@ -59,13 +59,15 @@ const ApplicationSchema = z
   .strict();
 
 /**
- * The schema describing the Jenkins job that can be started to rerun a test. Each target
- * maps the hardware of an application to the label of the Jenkins node that produces it.
+ * The schema describing the Jenkins jobs that can be started to rerun a test. Each
+ * application has its own job, whose name may contain the folders it is in separated by
+ * `/`. Each target maps the hardware of an application to the label of the Jenkins node
+ * that produces it.
  */
 const JenkinsSchema = z
   .object({
     url: z.url(),
-    job: z.string().min(1),
+    jobs: z.record(NameSchema, z.string().regex(/^[^/]+(\/[^/]+)*$/)),
     targets: z.array(
       z
         .object({
@@ -76,7 +78,18 @@ const JenkinsSchema = z
         .strict()
     )
   })
-  .strict();
+  .strict()
+  .superRefine((jenkins, ctx) => {
+    jenkins.targets.forEach((target, i) => {
+      if (!Object.hasOwn(jenkins.jobs, target.application)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['targets', i, 'application'],
+          message: `no Jenkins job is configured for the application '${target.application}'`
+        });
+      }
+    });
+  });
 
 /**
  * The schema describing the structure of the main configuration file.
@@ -305,30 +318,35 @@ class Configuration {
   /// The list of hardware names that should be checked by default in the frontend
   preferredHardware: string[];
 
-  /// The Jenkins job that is started to rerun a test, or `null` if tests cannot be rerun.
-  /// The `user` and `token` are only read from the JENKINS_USER and JENKINS_TOKEN
-  /// environment variables
+  /// The Jenkins jobs that are started to rerun a test, or `null` if tests cannot be
+  /// rerun. The `jobs` map each application to the name of its job. The `user` and
+  /// `token` are only read from the JENKINS_USER and JENKINS_TOKEN environment variables
   jenkins: {
     url: string;
-    job: string;
+    jobs: Record<string, string>;
     user: string;
     token: string;
     targets: { application: string; hardware: string; node: string }[];
   } | null;
 
   /**
-   * Returns the label of the Jenkins node on which the tests of the provided application
-   * and hardware can be rerun.
+   * Returns the Jenkins job and the label of the node with which the tests of the
+   * provided application and hardware can be rerun.
    *
    * @param application The name of the application of the test
    * @param hardware The hardware of the test
-   * @returns The label of the Jenkins node or `null` if the test cannot be rerun
+   * @returns The name of the job and the label of the node, or `null` if the test cannot
+   *          be rerun
    */
-  rerunNode(application: string, hardware: string): string | null {
+  rerunTarget(
+    application: string,
+    hardware: string
+  ): { job: string; node: string } | null {
     const target = this.jenkins?.targets.find(
       (t) => t.application === application && t.hardware === hardware
     );
-    return target ? target.node : null;
+    const job = target ? this.jenkins?.jobs[target.application] : undefined;
+    return target && job ? { job: job, node: target.node } : null;
   }
 
   /// The list of CORS origins that are allowed to access the API, or `null` if the API

@@ -1165,8 +1165,8 @@ async function handleRerunTest(req: express.Request, res: express.Response) {
   const { application, group, name, hardware, commit } = parse(RerunTestSchema, req.body);
   requireApplication(application);
 
-  const node = Config.rerunNode(application, hardware);
-  if (node == null) {
+  const target = Config.rerunTarget(application, hardware);
+  if (target == null) {
     throw new ValidationError(
       `Tests of ${application} on ${hardware} cannot be rerun, as no Jenkins node is ` +
         'configured for them'
@@ -1180,8 +1180,9 @@ async function handleRerunTest(req: express.Request, res: express.Response) {
 
   printAudit(
     `Rerunning (${application}, ${group}, ${name}, ${hardware}) at ` +
-      `${commit ?? 'the latest commit'} on ${node} requested by ${req.ip ?? 'unknown'}`
+      `${commit ?? 'the latest commit'} with ${target.job} on ${target.node} requested ` +
+      `by ${req.ip ?? 'unknown'}`
   );
-  await triggerRerun(node, `${group}/${name}`, commit ?? null);
+  await triggerRerun(target.job, target.node, `${group}/${name}`, commit ?? null);
   res.status(202).json({ queued: true });
 }

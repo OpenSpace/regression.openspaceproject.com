@@ -60,8 +60,11 @@ beforeAll(() => {
       runners: [Runner],
       jenkins: {
         url: 'https://jenkins.test/',
-        job: 'image testing',
-        targets: [{ application: 'openspace', hardware: 'hw1', node: 'node-hw1' }]
+        jobs: { openspace: 'image testing', sgct: 'SGCT/image-testing' },
+        targets: [
+          { application: 'openspace', hardware: 'hw1', node: 'node-hw1' },
+          { application: 'sgct', hardware: 'hw1', node: 'sgct-node-hw1' }
+        ]
       }
     })
   );
@@ -395,10 +398,34 @@ describe('rerunning tests', () => {
     expect(body.get('COMMIT')).toBe('abcdef1');
   });
 
+  it('starts the Jenkins job of the application', async () => {
+    expect(
+      (await submit({ application: 'sgct', group: 'sgct-group', name: 'sgct-test' }))
+        .status
+    ).toBe(200);
+    const jenkins = mockJenkins(new Response(null, { status: 201 }));
+
+    const res = await rerun({
+      application: 'sgct',
+      group: 'sgct-group',
+      name: 'sgct-test'
+    });
+    expect(res.status).toBe(202);
+    const [url, init] = jenkins.mock.calls[0]!;
+    expect(url).toBe(
+      'https://jenkins.test/job/SGCT/job/image-testing/buildWithParameters'
+    );
+    expect(Object.fromEntries(init?.body as URLSearchParams)).toEqual({
+      NODE: 'sgct-node-hw1',
+      TEST_ID: 'sgct-group/sgct-test',
+      COMMIT: ''
+    });
+  });
+
   it('rejects tests that cannot be rerun and invalid commits', async () => {
     const jenkins = mockJenkins(new Response(null, { status: 201 }));
     expect((await rerun({ hardware: 'hw2' })).status).toBe(400);
-    expect((await rerun({ application: 'sgct' })).status).toBe(400);
+    expect((await rerun({ application: 'sgct', hardware: 'hw2' })).status).toBe(400);
     expect((await rerun({ commit: 'main; rm -rf' })).status).toBe(400);
     expect((await rerun({ name: 'unknown' })).status).toBe(404);
     expect(jenkins).not.toHaveBeenCalled();
@@ -721,7 +748,8 @@ describe('other endpoints', () => {
       { name: 'sgct', repository: 'https://github.com/SGCT/SGCT' }
     ]);
     expect(res.body.rerunTargets).toEqual([
-      { application: 'openspace', hardware: 'hw1' }
+      { application: 'openspace', hardware: 'hw1' },
+      { application: 'sgct', hardware: 'hw1' }
     ]);
   });
 

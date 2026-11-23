@@ -34,12 +34,14 @@ const RequestTimeout = 15 * 1000;
  * Starts the Jenkins job that builds the application and reruns a single test. Jenkins
  * only queues the build, so this returns as soon as the request was accepted.
  *
+ * @param job The name of the Jenkins job, with the folders it is in separated by `/`
  * @param node The label of the Jenkins node on which the test should run
  * @param testId The `group/name` of the test that should be run
  * @param commit The commit that should be built, or `null` to build the latest commit
  * @returns The URL of the queue item that Jenkins created, if it returned one
  */
 export async function triggerRerun(
+  job: string,
   node: string,
   testId: string,
   commit: string | null
@@ -49,9 +51,12 @@ export async function triggerRerun(
     throw new Error('Jenkins is not configured');
   }
 
-  const url =
-    `${jenkins.url.replace(/\/+$/, '')}/job/${encodeURIComponent(jenkins.job)}` +
-    '/buildWithParameters';
+  // Jenkins addresses a job in a folder as `/job/<folder>/job/<name>`
+  const jobPath = job
+    .split('/')
+    .map((part) => `/job/${encodeURIComponent(part)}`)
+    .join('');
+  const url = `${jenkins.url.replace(/\/+$/, '')}${jobPath}/buildWithParameters`;
   const auth = Buffer.from(`${jenkins.user}:${jenkins.token}`).toString('base64');
 
   // Requests that authenticate with an API token do not need a CSRF crumb
