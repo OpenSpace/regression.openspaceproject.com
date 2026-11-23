@@ -4,6 +4,7 @@ import { compareUrl, resultUrl } from '../frontend/src/api';
 import { TestData, TestRecord } from '../frontend/src/types';
 import {
   classifyValues,
+  githubIssueUrl,
   imageCount,
   imageError,
   sortRecords,
@@ -124,5 +125,34 @@ describe('classifyValues', () => {
 
   it('ignores floating point noise', () => {
     expect(classifyValues([0.1, 0.1 + 1e-9, 0.1 - 1e-9])).toBe(Trend.Stable);
+  });
+});
+
+describe('githubIssueUrl', () => {
+  const repository = 'https://github.com/openspace/openspace';
+  const rec = record('a', 0.1, '2026-01-03T00:00:00Z');
+  const data = rec.data[0]!;
+
+  it('prefills the title, body, labels and type', () => {
+    const previous = (globalThis as { window?: unknown }).window;
+    (globalThis as { window?: unknown }).window = {
+      location: { origin: 'https://regression.example.com' }
+    };
+    try {
+      const url = new URL(githubIssueUrl(rec, data, repository)!);
+      expect(`${url.origin}${url.pathname}`).toBe(`${repository}/issues/new`);
+      expect(url.searchParams.get('title')).toBe('Failing image test: hw/group/a');
+      expect(url.searchParams.get('labels')).toBe(
+        'Component: Rendering,Feature: Testing'
+      );
+      expect(url.searchParams.get('type')).toBe('Bug');
+      expect(url.searchParams.get('body')).toContain('**Test:** openspace / group / a');
+    } finally {
+      (globalThis as { window?: unknown }).window = previous;
+    }
+  });
+
+  it('returns null if the repository is unknown', () => {
+    expect(githubIssueUrl(rec, data, null)).toBeNull();
   });
 });

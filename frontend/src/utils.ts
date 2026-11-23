@@ -47,9 +47,10 @@ export function commitUrl(repository: string | null, commitHash: string): string
 
 /**
  * Returns the URL to the GitHub "New Issue" page of the `repository` with the title and
- * body prefilled with the information about the test run `data` of `record`. The links in
- * the body have to be absolute as they are opened from GitHub. Returns `null` if the
- * repository is not known.
+ * body prefilled with the information about the test run `data` of `record`, along with
+ * the labels "Component: Rendering" and "Feature: Testing" and the issue type "Bug". The
+ * links in the body have to be absolute as they are opened from GitHub. Returns `null`
+ * if the repository is not known.
  */
 export function githubIssueUrl(
   record: TestRecord,
@@ -87,7 +88,12 @@ export function githubIssueUrl(
     ...imageRows
   ].join('\n');
 
-  const params = new URLSearchParams({ title, body });
+  const params = new URLSearchParams({
+    title,
+    body,
+    labels: 'Component: Rendering,Feature: Testing',
+    type: 'Bug'
+  });
   return `${repository}/issues/new?${params.toString()}`;
 }
 
