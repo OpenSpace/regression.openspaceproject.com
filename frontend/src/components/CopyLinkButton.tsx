@@ -58,7 +58,7 @@ export function CopyLinkButton({ link, label, size = 'xs' }: Props) {
         : label;
 
   return (
-    <Tooltip label={tooltip} withArrow opened={status !== 'idle' ? true : undefined}>
+    <Tooltip label={tooltip} withArrow {...(status !== 'idle' ? { opened: true } : {})}>
       <ActionIcon
         variant={'subtle'}
         size={size}

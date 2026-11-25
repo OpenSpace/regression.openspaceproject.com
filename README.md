@@ -16,7 +16,7 @@ Important terms to understand the testing results:
 
 
 ## Backend
-The _backend_ is a Typescript-based server that is receiving individual tests, creating comparison images, and making past tests available via a website. By default this server is located at [https://regression.openspaceproject.com](https://regression.openspaceproject.com), but it is also possible to run a local copy of it.
+The *backend* is a Typescript-based server that is receiving individual tests, creating comparison images, and making past tests available via a website. By default this server is located at [https://regression.openspaceproject.com](https://regression.openspaceproject.com), but it is also possible to run a local copy of it.
 
 To run the regression server locally:
 
@@ -28,13 +28,13 @@ To run the regression server locally:
   1. Run `npm run server` to start the hosting of the regression server
   1. Visit `localhost:8000` (or whichever `PORT` was configured in the `.env`) and an empty webpage should be visible
 
-The runner ids have to be provided by the _Runners_ when they submit tests, so they should be treated like passwords. The test results are always stored in the `data` folder next to the `config.json`.
+The runner ids have to be provided by the *Runners* when they submit tests, so they should be treated like passwords. The test results are always stored in the `data` folder next to the `config.json`.
 
 For development, `npm run dev` starts the backend (restarting it whenever a file in `src` changes) together with the Vite development server of the frontend, which forwards all API calls to the backend. `npm test` runs the automated tests and `npm run lint` checks the formatting and the code style.
 
 The server expects to run behind exactly one reverse proxy (for example nginx), from which it takes the client's IP address for the rate limiting and the audit log. If the server is reachable without a proxy, clients could fake their address and work around the rate limiting. The server keeps idle connections open for 65 seconds, so the proxy must not reuse a connection that has been idle for longer than that (for example `ttl=60` on Apache's `ProxyPass`). Otherwise the server might close a connection just as the proxy sends a request on it, which the proxy reports as a 502 error.
 
-The webpage provides access to the previous test results. The main panel is the table view in the center that shows all tests that have been run sorted by their error score. For each test, the latest score, application, group, name, hardware, how long it took to run the test, which commit of OpenSpace was used to generated the test, the timestamp at which the test was run, and the reference, candidate, and difference images for the latest test are shown. The tests can be filtered by application and by hardware using the checkboxes (or the dropdowns) in the control bar at the top. For tests with multiple images, the table shows the images with the largest error, with a small badge showing which image that is (`2/2` is the second of two images), and the tooltip of the error score lists the scores of all images. By clicking on an entry, the entire test history is available, in which each image of a test run has its own row. In this detail view the most recent image (on the left) also has an "Upgrade Candidate to Reference" image button, which will set the latest Candidate Image to be the new Reference image. **Note**: This should only be done when it is clear that a change in OpenSpace _improved_ the rendering. It should not be done just to silence an error message. Also note that this action can only be done after entering the "Admin" password in the header at the top of the site. If Jenkins is configured (see [Rerunning tests](#rerunning-tests)), the "Rerun Test" button starts the Jenkins job of the test's application that builds it, either at the commit of the latest test run or at the latest commit, and runs only that test again on the same hardware. The result shows up in the history once the job has finished.
+The webpage provides access to the previous test results. The main panel is the table view in the center that shows all tests that have been run sorted by their error score. For each test, the latest score, application, group, name, hardware, how long it took to run the test, which commit of OpenSpace was used to generated the test, the timestamp at which the test was run, and the reference, candidate, and difference images for the latest test are shown. The tests can be filtered by application and by hardware using the checkboxes (or the dropdowns) in the control bar at the top. For tests with multiple images, the table shows the images with the largest error, with a small badge showing which image that is (`2/2` is the second of two images), and the tooltip of the error score lists the scores of all images. By clicking on an entry, the entire test history is available, in which each image of a test run has its own row. In this detail view the most recent image (on the left) also has an "Upgrade Candidate to Reference" image button, which will set the latest Candidate Image to be the new Reference image. **Note**: This should only be done when it is clear that a change in OpenSpace *improved* the rendering. It should not be done just to silence an error message. Also note that this action can only be done after entering the "Admin" password in the header at the top of the site. If Jenkins is configured (see [Rerunning tests](#rerunning-tests)), the "Rerun Test" button starts the Jenkins job of the test's application that builds it, either at the commit of the latest test run or at the latest commit, and runs only that test again on the same hardware. The result shows up in the history once the job has finished.
 
 The "Hardware Compare" link in the top right gives the ability to compare either the latest reference or candidate images between hardware setups. On that page, the "Application", the "Group" and the "Name" of a test is entered, and the server will then generate pairwise comparison images for each hardware setup that has run that specific test. For tests with multiple images, a selector chooses the image that is compared. This can be useful to ensure not only a temporal stability for individual hardware setups, but also that, for example, the Windows version of OpenSpace generates the same result as the Linux version.
 
@@ -87,7 +87,7 @@ The server calls the `buildWithParameters` endpoint of the application's job wit
 ### Migrating an existing data folder
 The server only understands the application-based folder layout described above. If you are upgrading a server that stores data in the old layout (`data/tests/<hardware>/...` without the application level), stop the server and run the migration script before starting the new version:
 
-  ```
+  ```sh
   python scripts/0-migrate_to_applications.py --data-dir data
   ```
 
@@ -95,7 +95,7 @@ The script moves all existing hardware folders under `data/tests/openspace/` and
 
 The server stores the information about the test runs in the `testresults.db` database. If you are upgrading a server that still stores this information in `data.json`, `log.txt`, and `ref.txt` files, the server refuses to start. Make a backup of the `data` folder, stop the server, and run the second migration script after the first one:
 
-  ```
+  ```sh
   python scripts/1-migrate_to_sqlite.py --data-dir data
   ```
 
@@ -103,7 +103,7 @@ The script reads and validates all `data.json`, `log.txt`, and `ref.txt` files a
 
 Before multiple images per test were supported, the database stored the results of the single image of a test run directly in the `test_runs` table. If you are upgrading such a server, the server refuses to start. Make a backup of the `testresults.db`, stop the server, and run the third migration script:
 
-  ```
+  ```sh
   python scripts/2-migrate_to_multiple_images.py --data-dir data
   ```
 
@@ -114,7 +114,7 @@ The `config.json` of older versions contains settings that are no longer support
 ### Removing a hardware
 All test runs of a hardware (for example a test machine that is no longer used) can be removed with:
 
-  ```
+  ```sh
   python scripts/remove_hardware.py windows-amd --data-dir data
   ```
 

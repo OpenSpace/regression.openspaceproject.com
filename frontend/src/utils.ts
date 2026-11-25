@@ -1,5 +1,11 @@
 import { resultUrl } from './api';
-import { SortColumn, SortDirection, TestData, TestKey, TestRecord } from './types';
+import {
+  type SortColumn,
+  type SortDirection,
+  type TestData,
+  type TestKey,
+  type TestRecord
+} from './types';
 
 export function timingDisplay(timing: number): string {
   return `${Math.round(timing * 1000) / 1000}s`;
@@ -132,7 +138,7 @@ export async function copyText(text: string): Promise<boolean> {
   textarea.style.opacity = '0';
   document.body.appendChild(textarea);
   textarea.select();
-  let copied = false;
+  let copied: boolean;
   try {
     copied = document.execCommand('copy');
   } catch {

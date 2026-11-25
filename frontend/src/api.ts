@@ -1,4 +1,4 @@
-import { AppConfig, TestKey } from './types';
+import { type AppConfig, type TestKey } from './types';
 
 /**
  * Joins the provided values into a URL path, encoding each of them.

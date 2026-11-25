@@ -14,7 +14,7 @@ import {
 import { useDisclosure } from '@mantine/hooks';
 
 import { fetchJson, historyUrl, resultUrl } from '../api';
-import { TestData, TestRecord } from '../types';
+import { type TestData, type TestRecord } from '../types';
 import {
   commitUrl,
   githubIssueUrl,
@@ -322,7 +322,7 @@ export function TestHistory({
                                   open();
                                 }}
                                 loading={updating}
-                                data-disabled={canUpdateReference ? undefined : true}
+                                {...(canUpdateReference ? {} : { 'data-disabled': true })}
                               >
                                 Upgrade Candidate to Reference
                               </Button>
@@ -354,7 +354,9 @@ export function TestHistory({
                                     rerunDialog.open();
                                   }}
                                   loading={rerunning}
-                                  data-disabled={canUpdateReference ? undefined : true}
+                                  {...(canUpdateReference
+                                    ? {}
+                                    : { 'data-disabled': true })}
                                 >
                                   Rerun Test
                                 </Button>

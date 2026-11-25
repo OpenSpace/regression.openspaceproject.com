@@ -1,6 +1,6 @@
 import { Stack, Table, UnstyledButton } from '@mantine/core';
 
-import { SortColumn, SortDirection } from '../types';
+import { type SortColumn, type SortDirection } from '../types';
 
 interface Props {
   sortKey: SortColumn;

@@ -1,6 +1,6 @@
 import { Anchor, Box, Table, Text, Tooltip } from '@mantine/core';
 
-import { TestData, TestRecord } from '../types';
+import { type TestData, type TestRecord } from '../types';
 import {
   classifyValues,
   commitUrl,

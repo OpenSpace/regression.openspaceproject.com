@@ -1,0 +1,3 @@
+{
+  "extends": "@openspace/shared-configs/markdownlint.json"
+}

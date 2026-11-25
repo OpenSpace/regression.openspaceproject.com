@@ -1,5 +1,7 @@
-README.md
 config.json
 config.sample.json
 data
 dist
+
+# Markdown is checked by markdownlint, whose list indentation differs from Prettier's
+*.md

@@ -26,7 +26,13 @@ import { CopyLinkButton } from '../components/CopyLinkButton';
 import { SortableHeader } from '../components/SortableHeader';
 import { TestHistory } from '../components/TestHistory';
 import { TestRow } from '../components/TestRow';
-import { AppConfig, SortColumn, SortDirection, TestKey, TestRecord } from '../types';
+import {
+  type AppConfig,
+  type SortColumn,
+  type SortDirection,
+  type TestKey,
+  type TestRecord
+} from '../types';
 import { sortRecords, testLink } from '../utils';
 
 /**

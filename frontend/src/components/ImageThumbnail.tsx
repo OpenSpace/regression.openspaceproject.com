@@ -1,12 +1,12 @@
 import { Anchor, Badge } from '@mantine/core';
 
 import { resultUrl } from '../api';
-import { TestKey } from '../types';
+import { type TestKey } from '../types';
 
 interface Props {
   type: string;
   test: TestKey;
-  timestamp?: string;
+  timestamp?: string | undefined;
   /// Increased whenever the images might have changed on the server
   revision?: number;
   stopPropagation?: boolean;

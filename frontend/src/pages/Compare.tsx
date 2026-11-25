@@ -16,7 +16,7 @@ import {
 
 import { compareUrl, errorMessage, fetchConfig, fetchJson, resultUrl } from '../api';
 import { PixelDiffNumber } from '../components/PixelDiffNumber';
-import { TestRecord } from '../types';
+import { type TestRecord } from '../types';
 import { imageCount } from '../utils';
 
 type ImageType = 'reference' | 'candidate';
