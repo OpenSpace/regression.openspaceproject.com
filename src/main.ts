@@ -42,6 +42,15 @@ import { backfillImageHashes, stopRegeneration, verifyDataFolder } from './testr
 const ShutdownTimeout = 30 * 1000;
 
 /**
+ * The time (in milliseconds) that the server keeps an idle connection open for another
+ * request. The reverse proxy reuses its connections to the server, so this has to be
+ * longer than the time that the proxy keeps idle connections around. Otherwise the server
+ * might close a connection just as the proxy sends a request on it, which the proxy
+ * reports as a 502 error. Node's default of 5 seconds is too short for that
+ */
+const KeepAliveTimeout = 65 * 1000;
+
+/**
  * Stops the server once all running operations have finished, closes the database, and
  * exits the process.
  *
@@ -80,6 +89,10 @@ export async function main() {
     await backfillImageHashes();
 
     const server = http.createServer(createApp());
+    server.keepAliveTimeout = KeepAliveTimeout;
+    // The time for receiving the headers of a request has to be longer than the time a
+    // connection is kept alive, so that a request on an idle connection is not cut off
+    server.headersTimeout = KeepAliveTimeout + 1000;
     server.on('error', (err) => {
       console.error('Failed to start server:', err);
       process.exit(1);
